@@ -1,0 +1,14 @@
+name: Main Build
+
+on:
+  push:
+    branches: ["main"]
+
+  workflow_dispatch:
+
+jobs:
+  merge-build:
+    uses: devopsplaybook-io/common-utils/.github/workflows/reusable-merge-build.yml@main
+    secrets:
+      DOCKER_HUB_USERNAME: ${{ secrets.DOCKER_HUB_USERNAME }}
+      DOCKER_HUB_ACCESS_TOKEN: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}

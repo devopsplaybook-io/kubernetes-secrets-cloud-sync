@@ -1,0 +1,8 @@
+{
+  "SYNC_CRON_SCHEDULE": "*/5 * * * *",
+  "ANNOTATION_PREFIX": "secrets.cloudsync.devopsplaybook.io",
+  "SECRET_NAME_PREFIX": "cloudsync-",
+  "ALIBABA_KMS_REGION": "",
+  "ALIBABA_KMS_ACCESS_KEY_ID": "",
+  "ALIBABA_KMS_ACCESS_KEY_SECRET": ""
+}
