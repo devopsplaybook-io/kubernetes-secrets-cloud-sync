@@ -1,6 +1,4 @@
 import { StandardMeter, StandardTracer } from "@devopsplaybook.io/otel-utils";
-import { StandardTracerFastifyRegisterHooks } from "@devopsplaybook.io/otel-utils-fastify";
-import Fastify from "fastify";
 import { watchFile } from "fs-extra";
 import cron from "node-cron";
 import { Config } from "./Config";
@@ -76,34 +74,4 @@ Promise.resolve().then(async () => {
   } else {
     logger.error(`Invalid cron schedule: ${config.SYNC_CRON_SCHEDULE}`);
   }
-
-  // API
-  const fastify = Fastify({
-    logger: config.LOG_LEVEL === process.env.FASTIFY_LOG_LEVEL,
-  });
-
-  StandardTracerFastifyRegisterHooks(fastify, OTelTracer(), OTelLogger(), {
-    ignoreList: ["GET-/api/status"],
-  });
-
-  fastify.get("/api/status", async () => {
-    return { started: true };
-  });
-
-  fastify.post("/api/sync", async (_request, reply) => {
-    try {
-      await secretSync.runSync();
-      reply.status(200).send({ status: "ok" });
-    } catch {
-      reply.status(500).send({ error: "Sync failed" });
-    }
-  });
-
-  fastify.listen({ port: config.API_PORT, host: "0.0.0.0" }, (err) => {
-    if (err) {
-      logger.error("Error Starting API", err);
-      process.exit(1);
-    }
-    logger.info("API Listening");
-  });
 });

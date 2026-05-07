@@ -50,7 +50,7 @@ export class Config implements ConfigOTelInterface {
       let fromEnv = "defaults";
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const self = this as Record<string, any>;
-      if (process.env[field]) {
+      if (process.env[field] !== undefined) {
         self[field] = process.env[field];
         fromEnv = "environment";
       } else if (content[field] !== undefined) {
