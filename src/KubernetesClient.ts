@@ -135,8 +135,10 @@ export class KubernetesClient {
       );
     } catch (error: unknown) {
       const statusCode =
+        (error as { code?: number })?.code ||
         (error as { response?: { statusCode?: number } })?.response
-          ?.statusCode || (error as { statusCode?: number })?.statusCode;
+          ?.statusCode ||
+        (error as { statusCode?: number })?.statusCode;
       if (statusCode === 404) {
         // Secret doesn't exist yet, create it
         await this.k8sApi.createNamespacedSecret({
