@@ -125,11 +125,11 @@ export class KubernetesClient {
 
     try {
       // Try to replace the existing secret first
-      await this.k8sApi.replaceNamespacedSecret(
-        k8sSecretName,
-        namespace,
-        secretBody,
-      );
+      await this.k8sApi.replaceNamespacedSecret({
+        name: k8sSecretName,
+        namespace: namespace,
+        body: secretBody,
+      });
       logger.info(
         `Updated secret: ${namespace}/${k8sSecretName} (${Object.keys(data).length} keys)`,
       );
@@ -139,7 +139,10 @@ export class KubernetesClient {
           ?.statusCode || (error as { statusCode?: number })?.statusCode;
       if (statusCode === 404) {
         // Secret doesn't exist yet, create it
-        await this.k8sApi.createNamespacedSecret(namespace, secretBody);
+        await this.k8sApi.createNamespacedSecret({
+          namespace: namespace,
+          body: secretBody,
+        });
         logger.info(
           `Created secret: ${namespace}/${k8sSecretName} (${Object.keys(data).length} keys)`,
         );
