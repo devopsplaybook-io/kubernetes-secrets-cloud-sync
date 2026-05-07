@@ -37,6 +37,7 @@ declare module "@alicloud/openapi-client" {
   export class Config {
     accessKeyId?: string;
     accessKeySecret?: string;
+    regionId?: string;
     endpoint?: string;
     constructor(props?: Partial<Config>);
   }

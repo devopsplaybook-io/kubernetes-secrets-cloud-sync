@@ -38,6 +38,7 @@ export class AlibabaKmsSource extends BaseSecretSource {
     const openApiConfig = new OpenApiConfig({
       accessKeyId: this.config.ALIBABA_KMS_ACCESS_KEY_ID,
       accessKeySecret: this.config.ALIBABA_KMS_ACCESS_KEY_SECRET,
+      regionId: this.config.ALIBABA_KMS_REGION,
       endpoint: `kms.${this.config.ALIBABA_KMS_REGION}.aliyuncs.com`,
     });
 
@@ -54,7 +55,6 @@ export class AlibabaKmsSource extends BaseSecretSource {
 
     const request = new GetSecretValueRequest({
       secretName,
-      versionId: "ACSCurrent",
     });
 
     const runtime = new RuntimeOptions({
