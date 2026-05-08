@@ -10,7 +10,6 @@ export class Config implements ConfigOTelInterface {
   public readonly CONFIG_FILE: string = "config.json";
   public readonly SERVICE_ID = "kubernetes-secrets-cloud-sync";
   public VERSION = "1";
-  public readonly API_PORT: number = 8080;
   public LOG_LEVEL = "info";
   public OPENTELEMETRY_COLLECTOR_HTTP_TRACES = "";
   public OPENTELEMETRY_COLLECTOR_HTTP_METRICS = "";
@@ -22,6 +21,7 @@ export class Config implements ConfigOTelInterface {
 
   // Sync-specific configuration
   public SYNC_CRON_SCHEDULE = "*/5 * * * *";
+  public JOB_MODE = false;
   public ANNOTATION_PREFIX = "secrets.cloudsync.devopsplaybook.io";
   public SECRET_NAME_PREFIX = "cloudsync-";
 
@@ -80,6 +80,7 @@ export class Config implements ConfigOTelInterface {
 
     // Sync configuration
     setIfSet("SYNC_CRON_SCHEDULE");
+    setIfSet("JOB_MODE");
     setIfSet("ANNOTATION_PREFIX");
     setIfSet("SECRET_NAME_PREFIX");
 

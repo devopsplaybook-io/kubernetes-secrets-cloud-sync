@@ -61,6 +61,15 @@ Promise.resolve().then(async () => {
     logger.error(`Initial sync failed: ${error}`);
   }
 
+  // Check if running in job mode (run once and exit)
+  const jobModeValue = config.JOB_MODE as string | boolean;
+  const jobMode =
+    jobModeValue === true || jobModeValue === "true" || jobModeValue === "1";
+  if (jobMode) {
+    logger.info("Job mode enabled. Sync complete. Exiting...");
+    process.exit(0);
+  }
+
   // Schedule periodic sync
   if (cron.validate(config.SYNC_CRON_SCHEDULE)) {
     cron.schedule(config.SYNC_CRON_SCHEDULE, async () => {

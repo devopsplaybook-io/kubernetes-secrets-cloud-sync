@@ -59,6 +59,7 @@ Configuration can be set via `config.json` or environment variables:
 | Key                             | Default                               | Description                                |
 | ------------------------------- | ------------------------------------- | ------------------------------------------ |
 | `SYNC_CRON_SCHEDULE`            | `*/5 * * * *`                         | Cron schedule for periodic sync            |
+| `JOB_MODE`                      | `false`                               | Run sync once on startup and exit          |
 | `ANNOTATION_PREFIX`             | `secrets.cloudsync.devopsplaybook.io` | Annotation key prefix                      |
 | `SECRET_NAME_PREFIX`            | `cloudsync-`                          | Prefix for created Kubernetes secret names |
 | `ALIBABA_KMS_REGION`            |                                       | Alibaba Cloud region                       |
