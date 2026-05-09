@@ -26,9 +26,10 @@ metadata:
   name: my-app
   annotations:
     secrets.cloudsync.devopsplaybook.io/alibaba-kms: "feedwatcher,otel-common"
+    secrets.cloudsync.devopsplaybook.io/aws-secretsmanager: "prod/my-app/db,prod/my-app/api"
 ```
 
-This will sync the `feedwatcher` and `otel-common` secrets from Alibaba KMS into the `my-app` namespace.
+This will sync the `feedwatcher` and `otel-common` secrets from Alibaba KMS and the `prod/my-app/db` and `prod/my-app/api` secrets from AWS Secrets Manager into the `my-app` namespace.
 
 ### Created Secrets
 
@@ -46,9 +47,10 @@ A Kubernetes Secret named `cloudsync-feedwatcher` is created with each JSON key 
 
 ## Supported Cloud Providers
 
-| Provider    | Annotation Suffix | Status    |
-| ----------- | ----------------- | --------- |
-| Alibaba KMS | `alibaba-kms`     | Supported |
+| Provider            | Annotation Suffix    | Status    |
+| ------------------- | -------------------- | --------- |
+| Alibaba KMS         | `alibaba-kms`        | Supported |
+| AWS Secrets Manager | `aws-secretsmanager` | Supported |
 
 The architecture is designed to be extensible. Additional providers can be added by implementing the `SecretSource` interface.
 
@@ -56,17 +58,20 @@ The architecture is designed to be extensible. Additional providers can be added
 
 Configuration can be set via `config.json` or environment variables:
 
-| Key                             | Default                               | Description                                |
-| ------------------------------- | ------------------------------------- | ------------------------------------------ |
-| `SYNC_CRON_SCHEDULE`            | `*/5 * * * *`                         | Cron schedule for periodic sync            |
-| `JOB_MODE`                      | `false`                               | Run sync once on startup and exit          |
-| `ANNOTATION_PREFIX`             | `secrets.cloudsync.devopsplaybook.io` | Annotation key prefix                      |
-| `SECRET_NAME_PREFIX`            | `cloudsync-`                          | Prefix for created Kubernetes secret names |
-| `ALIBABA_KMS_REGION`            |                                       | Alibaba Cloud region                       |
-| `ALIBABA_KMS_ACCESS_KEY_ID`     |                                       | Alibaba Cloud access key ID                |
-| `ALIBABA_KMS_ACCESS_KEY_SECRET` |                                       | Alibaba Cloud access key secret            |
-| `LOG_LEVEL`                     | `info`                                | Log level                                  |
-| `API_PORT`                      | `8080`                                | HTTP API port                              |
+| Key                                    | Default                               | Description                                  |
+| -------------------------------------- | ------------------------------------- | -------------------------------------------- |
+| `SYNC_CRON_SCHEDULE`                   | `*/5 * * * *`                         | Cron schedule for periodic sync              |
+| `JOB_MODE`                             | `false`                               | Run sync once on startup and exit            |
+| `ANNOTATION_PREFIX`                    | `secrets.cloudsync.devopsplaybook.io` | Annotation key prefix                        |
+| `SECRET_NAME_PREFIX`                   | `cloudsync-`                          | Prefix for created Kubernetes secret names   |
+| `ALIBABA_KMS_REGION`                   |                                       | Alibaba Cloud region                         |
+| `ALIBABA_KMS_ACCESS_KEY_ID`            |                                       | Alibaba Cloud access key ID                  |
+| `ALIBABA_KMS_ACCESS_KEY_SECRET`        |                                       | Alibaba Cloud access key secret              |
+| `AWS_SECRETSMANAGER_REGION`            |                                       | AWS region (enables AWS Secrets Manager)     |
+| `AWS_SECRETSMANAGER_ACCESS_KEY_ID`     |                                       | AWS access key ID (optional, IRSA preferred) |
+| `AWS_SECRETSMANAGER_SECRET_ACCESS_KEY` |                                       | AWS secret access key (optional)             |
+| `LOG_LEVEL`                            | `info`                                | Log level                                    |
+| `API_PORT`                             | `8080`                                | HTTP API port                                |
 
 ## API Endpoints
 

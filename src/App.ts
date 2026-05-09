@@ -4,6 +4,7 @@ import cron from "node-cron";
 import { Config } from "./Config";
 import { KubernetesClient } from "./KubernetesClient";
 import { AlibabaKmsSource } from "./sources/AlibabaKmsSource";
+import { AwsSecretsManagerSource } from "./sources/AwsSecretsManagerSource";
 import { SecretSync } from "./SecretSync";
 import {
   OTelLogger,
@@ -33,7 +34,10 @@ Promise.resolve().then(async () => {
   span.end();
 
   // Initialize secret sources
-  const sources = [new AlibabaKmsSource(config)];
+  const sources = [
+    new AlibabaKmsSource(config),
+    new AwsSecretsManagerSource(config),
+  ];
 
   for (const source of sources) {
     try {
