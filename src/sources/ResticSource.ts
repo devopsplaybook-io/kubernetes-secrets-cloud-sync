@@ -134,15 +134,17 @@ export class ResticSource extends BaseSecretSource {
     if (!value) {
       return [];
     }
-    return value.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g)?.map((token) => {
-      if (
-        (token.startsWith("\"") && token.endsWith("\"")) ||
-        (token.startsWith("'") && token.endsWith("'"))
-      ) {
-        return token.slice(1, -1);
-      }
-      return token;
-    }) ?? [];
+    return (
+      value.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g)?.map((token) => {
+        if (
+          (token.startsWith('"') && token.endsWith('"')) ||
+          (token.startsWith("'") && token.endsWith("'"))
+        ) {
+          return token.slice(1, -1);
+        }
+        return token;
+      }) ?? []
+    );
   }
 
   private runRestic(args: string[]): Promise<string> {
