@@ -30,6 +30,11 @@ export class Config implements ConfigOTelInterface {
   public ALIBABA_KMS_ACCESS_KEY_ID = "";
   public ALIBABA_KMS_ACCESS_KEY_SECRET = "";
 
+  // AWS Secrets Manager configuration
+  public AWS_SECRETSMANAGER_REGION = "";
+  public AWS_SECRETSMANAGER_ACCESS_KEY_ID = "";
+  public AWS_SECRETSMANAGER_SECRET_ACCESS_KEY = "";
+
   constructor() {
     let version = "1";
     try {
@@ -88,5 +93,10 @@ export class Config implements ConfigOTelInterface {
     setIfSet("ALIBABA_KMS_REGION");
     setIfSet("ALIBABA_KMS_ACCESS_KEY_ID", false);
     setIfSet("ALIBABA_KMS_ACCESS_KEY_SECRET", false);
+
+    // AWS Secrets Manager configuration
+    setIfSet("AWS_SECRETSMANAGER_REGION");
+    setIfSet("AWS_SECRETSMANAGER_ACCESS_KEY_ID", false);
+    setIfSet("AWS_SECRETSMANAGER_SECRET_ACCESS_KEY", false);
   }
 }
