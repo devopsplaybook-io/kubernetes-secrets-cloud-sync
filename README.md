@@ -82,6 +82,7 @@ Configuration can be set via `config.json` or environment variables:
 | `JOB_MODE`                             | `false`                               | Run sync once on startup and exit            |
 | `ANNOTATION_PREFIX`                    | `secrets.cloudsync.devopsplaybook.io` | Annotation key prefix                        |
 | `SECRET_NAME_PREFIX`                   | `cloudsync-`                          | Prefix for created Kubernetes secret names   |
+| `DELETE_ORPHANED_SECRETS`              | `false`                               | Delete managed secrets no longer annotated   |
 | `ALIBABA_KMS_REGION`                   |                                       | Alibaba Cloud region                         |
 | `ALIBABA_KMS_ACCESS_KEY_ID`            |                                       | Alibaba Cloud access key ID                  |
 | `ALIBABA_KMS_ACCESS_KEY_SECRET`        |                                       | Alibaba Cloud access key secret              |

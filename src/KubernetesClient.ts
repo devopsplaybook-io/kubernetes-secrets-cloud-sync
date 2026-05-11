@@ -12,7 +12,9 @@ export class KubernetesClient {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private k8sApi: any;
   private readonly annotationPrefix: string;
-  private readonly secretNamePrefix: string;
+  public readonly secretNamePrefix: string;
+  public static readonly MANAGED_BY_LABEL = "app.kubernetes.io/managed-by";
+  public static readonly MANAGED_BY_VALUE = "kubernetes-secrets-cloud-sync";
 
   constructor(config: Config) {
     const kc = new k8s.KubeConfig();
@@ -151,6 +153,52 @@ export class KubernetesClient {
       } else {
         throw error;
       }
+    }
+  }
+
+  /**
+   * List every secret across the cluster that was created/managed by this
+   * controller (identified by the standard managed-by label).
+   */
+  async listManagedSecrets(): Promise<
+    { namespace: string; name: string }[]
+  > {
+    const labelSelector = `${KubernetesClient.MANAGED_BY_LABEL}=${KubernetesClient.MANAGED_BY_VALUE}`;
+    const result = await this.k8sApi.listSecretForAllNamespaces({
+      labelSelector,
+    });
+
+    const managed: { namespace: string; name: string }[] = [];
+    for (const secret of result.items ?? []) {
+      const ns = secret.metadata?.namespace;
+      const name = secret.metadata?.name;
+      if (ns && name) {
+        managed.push({ namespace: ns, name });
+      }
+    }
+    return managed;
+  }
+
+  /**
+   * Delete a Kubernetes secret.
+   */
+  async deleteSecret(namespace: string, name: string): Promise<void> {
+    try {
+      await this.k8sApi.deleteNamespacedSecret({ namespace, name });
+      logger.info(`Deleted orphaned secret: ${namespace}/${name}`);
+    } catch (error: unknown) {
+      const statusCode =
+        (error as { code?: number })?.code ||
+        (error as { response?: { statusCode?: number } })?.response
+          ?.statusCode ||
+        (error as { statusCode?: number })?.statusCode;
+      if (statusCode === 404) {
+        logger.info(
+          `Secret already gone, skipping delete: ${namespace}/${name}`,
+        );
+        return;
+      }
+      throw error;
     }
   }
 }

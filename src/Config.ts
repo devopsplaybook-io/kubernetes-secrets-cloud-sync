@@ -24,6 +24,7 @@ export class Config implements ConfigOTelInterface {
   public JOB_MODE = false;
   public ANNOTATION_PREFIX = "secrets.cloudsync.devopsplaybook.io";
   public SECRET_NAME_PREFIX = "cloudsync-";
+  public DELETE_ORPHANED_SECRETS = false;
 
   // Alibaba KMS configuration
   public ALIBABA_KMS_REGION = "";
@@ -94,6 +95,7 @@ export class Config implements ConfigOTelInterface {
     setIfSet("JOB_MODE");
     setIfSet("ANNOTATION_PREFIX");
     setIfSet("SECRET_NAME_PREFIX");
+    setIfSet("DELETE_ORPHANED_SECRETS");
 
     // Alibaba KMS configuration
     setIfSet("ALIBABA_KMS_REGION");

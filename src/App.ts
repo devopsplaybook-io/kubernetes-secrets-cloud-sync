@@ -58,7 +58,7 @@ Promise.resolve().then(async () => {
   const k8sClient = new KubernetesClient(config);
 
   // Initialize the sync orchestrator
-  const secretSync = new SecretSync(k8sClient, sources);
+  const secretSync = new SecretSync(k8sClient, sources, config);
 
   // Run initial sync on startup
   try {
