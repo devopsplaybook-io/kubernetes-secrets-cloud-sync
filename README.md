@@ -51,8 +51,26 @@ A Kubernetes Secret named `cloudsync-feedwatcher` is created with each JSON key 
 | ------------------- | -------------------- | --------- |
 | Alibaba KMS         | `alibaba-kms`        | Supported |
 | AWS Secrets Manager | `aws-secretsmanager` | Supported |
+| Restic              | `restic`             | Supported |
 
 The architecture is designed to be extensible. Additional providers can be added by implementing the `SecretSource` interface.
+
+### Restic Provider
+
+The restic provider restores the **latest snapshot** of the configured restic repository for every secret fetch, reads the `<secret-name>.json` file from the snapshot (optionally under `RESTIC_PATH`), and cleans up the temporary directory afterward. Each file must contain a flat JSON object whose keys/values become the Kubernetes Secret entries.
+
+Example file `feedwatcher.json` inside the restic snapshot:
+
+```json
+{
+  "LLM_MODEL": "gpt-4",
+  "LLM_API_KEY": "sk-..."
+}
+```
+
+With annotation `secrets.cloudsync.devopsplaybook.io/restic: "feedwatcher"`, a Kubernetes Secret named `cloudsync-feedwatcher` is created.
+
+The `restic` CLI must be available on the container `PATH` (included in the provided Docker image). Backend-specific environment variables (e.g. `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` for S3-backed repos) should be provided via the pod environment and will be forwarded to the `restic` process.
 
 ## Configuration
 
@@ -70,6 +88,10 @@ Configuration can be set via `config.json` or environment variables:
 | `AWS_SECRETSMANAGER_REGION`            |                                       | AWS region (enables AWS Secrets Manager)     |
 | `AWS_SECRETSMANAGER_ACCESS_KEY_ID`     |                                       | AWS access key ID (optional, IRSA preferred) |
 | `AWS_SECRETSMANAGER_SECRET_ACCESS_KEY` |                                       | AWS secret access key (optional)             |
+| `RESTIC_REPOSITORY`                    |                                       | Restic repository URL (enables restic)       |
+| `RESTIC_PASSWORD`                      |                                       | Restic repository password                   |
+| `RESTIC_PATH`                          |                                       | Optional sub-folder inside the snapshot      |
+| `RESTIC_OPTIONS`                       |                                       | Extra CLI args appended to every restic call |
 | `LOG_LEVEL`                            | `info`                                | Log level                                    |
 | `API_PORT`                             | `8080`                                | HTTP API port                                |
 

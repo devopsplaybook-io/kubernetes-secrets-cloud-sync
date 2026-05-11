@@ -14,6 +14,8 @@ RUN npm ci && \
 # RUN
 FROM node:24-alpine
 
+RUN apk add --no-cache restic
+
 COPY --from=builder /opt/src/node_modules /opt/app/node_modules
 COPY --from=builder /opt/src/dist /opt/app/dist
 COPY config.json /opt/app/config.json

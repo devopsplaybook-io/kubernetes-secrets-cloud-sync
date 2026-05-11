@@ -35,6 +35,12 @@ export class Config implements ConfigOTelInterface {
   public AWS_SECRETSMANAGER_ACCESS_KEY_ID = "";
   public AWS_SECRETSMANAGER_SECRET_ACCESS_KEY = "";
 
+  // Restic configuration
+  public RESTIC_REPOSITORY = "";
+  public RESTIC_PASSWORD = "";
+  public RESTIC_PATH = "";
+  public RESTIC_OPTIONS = "";
+
   constructor() {
     let version = "1";
     try {
@@ -98,5 +104,11 @@ export class Config implements ConfigOTelInterface {
     setIfSet("AWS_SECRETSMANAGER_REGION");
     setIfSet("AWS_SECRETSMANAGER_ACCESS_KEY_ID", false);
     setIfSet("AWS_SECRETSMANAGER_SECRET_ACCESS_KEY", false);
+
+    // Restic configuration
+    setIfSet("RESTIC_REPOSITORY");
+    setIfSet("RESTIC_PASSWORD", false);
+    setIfSet("RESTIC_PATH");
+    setIfSet("RESTIC_OPTIONS");
   }
 }
