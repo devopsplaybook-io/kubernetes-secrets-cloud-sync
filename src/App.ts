@@ -5,6 +5,7 @@ import { Config } from "./Config";
 import { KubernetesClient } from "./KubernetesClient";
 import { AlibabaKmsSource } from "./sources/AlibabaKmsSource";
 import { AwsSecretsManagerSource } from "./sources/AwsSecretsManagerSource";
+import { ResticSource } from "./sources/ResticSource";
 import { SecretSync } from "./SecretSync";
 import {
   OTelLogger,
@@ -37,6 +38,7 @@ Promise.resolve().then(async () => {
   const sources = [
     new AlibabaKmsSource(config),
     new AwsSecretsManagerSource(config),
+    new ResticSource(config),
   ];
 
   for (const source of sources) {
@@ -56,7 +58,7 @@ Promise.resolve().then(async () => {
   const k8sClient = new KubernetesClient(config);
 
   // Initialize the sync orchestrator
-  const secretSync = new SecretSync(k8sClient, sources);
+  const secretSync = new SecretSync(k8sClient, sources, config);
 
   // Run initial sync on startup
   try {

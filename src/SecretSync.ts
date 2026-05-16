@@ -1,3 +1,4 @@
+import { Config } from "./Config";
 import { SecretSource } from "./sources/SecretSource";
 import { KubernetesClient } from "./KubernetesClient";
 import { OTelLogger } from "./OTelContext";
@@ -12,13 +13,19 @@ const logger = OTelLogger().createModuleLogger("secret-sync");
  */
 export class SecretSync {
   private readonly k8sClient: KubernetesClient;
+  private readonly config: Config;
   private readonly sources: Map<string, SecretSource> = new Map<
     string,
     SecretSource
   >();
 
-  constructor(k8sClient: KubernetesClient, sources: SecretSource[]) {
+  constructor(
+    k8sClient: KubernetesClient,
+    sources: SecretSource[],
+    config: Config,
+  ) {
     this.k8sClient = k8sClient;
+    this.config = config;
     for (const source of sources) {
       this.sources.set(source.providerName, source);
     }
@@ -29,6 +36,7 @@ export class SecretSync {
    * 1. List namespaces with sync annotations
    * 2. For each namespace, fetch secrets from cloud providers
    * 3. Create/update Kubernetes secrets in each namespace
+   * 4. Optionally delete managed secrets that no longer match any annotation
    */
   async runSync(): Promise<void> {
     logger.info("Starting sync cycle");
@@ -36,12 +44,25 @@ export class SecretSync {
     let namespacesSynced = 0;
     let secretsSynced = 0;
     let errors = 0;
+    let namespaceListSucceeded = false;
+    const expected = new Set<string>();
 
     try {
       const requests = await this.k8sClient.getNamespaceSyncRequests();
+      namespaceListSucceeded = true;
       logger.info(
         `Found ${requests.length} namespace(s) with sync annotations`,
       );
+
+      // Build the expected set from annotations regardless of fetch outcome.
+      for (const request of requests) {
+        for (const annotation of request.annotations) {
+          for (const secretName of annotation.secretNames) {
+            const k8sSecretName = `${this.k8sClient.secretNamePrefix}${secretName}`;
+            expected.add(`${request.namespace}/${k8sSecretName}`);
+          }
+        }
+      }
 
       for (const request of requests) {
         try {
@@ -75,8 +96,32 @@ export class SecretSync {
       logger.error(`Failed to list namespaces: ${error}`);
     }
 
+    const deleteOrphansRaw = this.config.DELETE_ORPHANED_SECRETS as
+      | string
+      | boolean;
+    const deleteOrphans =
+      deleteOrphansRaw === true ||
+      deleteOrphansRaw === "true" ||
+      deleteOrphansRaw === "1";
+
+    let orphansDeleted = 0;
+    if (deleteOrphans) {
+      if (!namespaceListSucceeded) {
+        logger.warn(
+          "Skipping orphan cleanup: namespace listing failed, expected set is unreliable",
+        );
+      } else {
+        try {
+          orphansDeleted = await this.pruneOrphanedSecrets(expected);
+        } catch (error) {
+          errors++;
+          logger.error(`Failed to prune orphaned secrets: ${error}`);
+        }
+      }
+    }
+
     logger.info(
-      `Sync cycle complete: ${namespacesSynced} namespace(s), ${secretsSynced} secret(s), ${errors} error(s)`,
+      `Sync cycle complete: ${namespacesSynced} namespace(s), ${secretsSynced} secret(s), ${orphansDeleted} orphan(s) deleted, ${errors} error(s)`,
     );
   }
 
@@ -117,5 +162,34 @@ export class SecretSync {
     }
 
     return results;
+  }
+
+  /**
+   * Delete every managed secret that is no longer referenced by any
+   * namespace annotation.
+   */
+  private async pruneOrphanedSecrets(
+    expected: Set<string>,
+  ): Promise<number> {
+    const managed = await this.k8sClient.listManagedSecrets();
+    let deleted = 0;
+    for (const { namespace, name } of managed) {
+      const key = `${namespace}/${name}`;
+      if (expected.has(key)) {
+        continue;
+      }
+      try {
+        await this.k8sClient.deleteSecret(namespace, name);
+        deleted++;
+      } catch (error) {
+        logger.error(
+          `Failed to delete orphaned secret ${key}: ${error}`,
+        );
+      }
+    }
+    if (deleted > 0) {
+      logger.info(`Orphan cleanup deleted ${deleted} secret(s)`);
+    }
+    return deleted;
   }
 }
