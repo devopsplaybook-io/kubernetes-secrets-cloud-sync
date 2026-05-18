@@ -1,6 +1,6 @@
 {
   "name": "kubernetes-secrets-cloud-sync",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "author": "",
   "license": "MIT",
   "scripts": {
@@ -16,8 +16,8 @@
     "@alicloud/kms20160120": "^2.4.0",
     "@alicloud/openapi-client": "^0.4.15",
     "@alicloud/tea-util": "^1.4.11",
-    "@aws-sdk/client-secrets-manager": "^3.1045.0",
-    "@devopsplaybook.io/otel-utils-fastify": "^1.0.18",
+    "@aws-sdk/client-secrets-manager": "^3.1048.0",
+    "@devopsplaybook.io/otel-utils-fastify": "^1.0.19",
     "@kubernetes/client-node": "^1.4.0",
     "fastify": "^5.8.5",
     "fs-extra": "^11.3.5",
@@ -29,11 +29,11 @@
     "@eslint/js": "^10.0.1",
     "@types/fs-extra": "^11.0.4",
     "@types/jest": "^30.0.0",
-    "@types/node": "^25.6.2",
-    "eslint": "^10.3.0",
+    "@types/node": "^25.8.0",
+    "eslint": "^10.4.0",
     "sinon": "^22.0.0",
     "ts-node": "^10.9.2",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.59.2"
+    "typescript-eslint": "^8.59.3"
   }
 }
