@@ -224,8 +224,9 @@ describe("KubernetesClient", () => {
     });
 
     it("should create secret if replace returns 404", async () => {
-      const notFoundError = new Error("Not Found");
-      (notFoundError as any).code = 404;
+      const notFoundError = Object.assign(new Error("Not Found"), {
+        code: 404,
+      });
       mockReplaceNamespacedSecret.mockRejectedValue(notFoundError);
       mockCreateNamespacedSecret.mockResolvedValue({});
 
@@ -242,8 +243,9 @@ describe("KubernetesClient", () => {
     });
 
     it("should throw if replace fails with non-404 error", async () => {
-      const serverError = new Error("Server Error");
-      (serverError as any).code = 500;
+      const serverError = Object.assign(new Error("Server Error"), {
+        code: 500,
+      });
       mockReplaceNamespacedSecret.mockRejectedValue(serverError);
 
       await expect(
@@ -332,8 +334,9 @@ describe("KubernetesClient", () => {
     });
 
     it("should handle 404 gracefully when secret is already gone", async () => {
-      const notFoundError = new Error("Not Found");
-      (notFoundError as any).code = 404;
+      const notFoundError = Object.assign(new Error("Not Found"), {
+        code: 404,
+      });
       mockDeleteNamespacedSecret.mockRejectedValue(notFoundError);
 
       // Should not throw
@@ -343,8 +346,9 @@ describe("KubernetesClient", () => {
     });
 
     it("should throw if delete fails with non-404 error", async () => {
-      const forbiddenError = new Error("Forbidden");
-      (forbiddenError as any).code = 403;
+      const forbiddenError = Object.assign(new Error("Forbidden"), {
+        code: 403,
+      });
       mockDeleteNamespacedSecret.mockRejectedValue(forbiddenError);
 
       await expect(

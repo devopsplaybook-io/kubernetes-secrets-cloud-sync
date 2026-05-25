@@ -54,7 +54,9 @@ describe("Config", () => {
       expect(config.LOG_LEVEL).toBe("info");
       expect(config.SYNC_CRON_SCHEDULE).toBe("*/5 * * * *");
       expect(config.JOB_MODE).toBe(false);
-      expect(config.ANNOTATION_PREFIX).toBe("secrets.cloudsync.devopsplaybook.io");
+      expect(config.ANNOTATION_PREFIX).toBe(
+        "secrets.cloudsync.devopsplaybook.io",
+      );
       expect(config.SECRET_NAME_PREFIX).toBe("cloudsync-");
       expect(config.DELETE_ORPHANED_SECRETS).toBe(false);
     });

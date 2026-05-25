@@ -1,6 +1,8 @@
 import { SecretSync } from "./SecretSync";
 import { SecretSource } from "./sources/SecretSource";
-import { NamespaceSyncRequest, SecretFetchResult } from "./types";
+import { NamespaceSyncRequest } from "./types";
+import { KubernetesClient } from "./KubernetesClient";
+import { Config } from "./Config";
 
 describe("SecretSync", () => {
   // Mock dependencies
@@ -37,10 +39,11 @@ describe("SecretSync", () => {
   };
 
   // Mock config
-  const createMockConfig = (deleteOrphans: string | boolean = false) =>
-    ({
-      DELETE_ORPHANED_SECRETS: deleteOrphans,
-    }) as any;
+  const createMockConfig = (
+    deleteOrphans: boolean = false,
+  ): Partial<Config> => ({
+    DELETE_ORPHANED_SECRETS: deleteOrphans,
+  });
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -53,9 +56,7 @@ describe("SecretSync", () => {
       mockGetNamespaceSyncRequests.mockResolvedValue([
         {
           namespace: "default",
-          annotations: [
-            { provider: "alibaba-kms", secretNames: ["secret-a"] },
-          ],
+          annotations: [{ provider: "alibaba-kms", secretNames: ["secret-a"] }],
         },
       ]);
 
@@ -66,9 +67,9 @@ describe("SecretSync", () => {
       });
 
       const sync = new SecretSync(
-        mockK8sClient as any,
+        mockK8sClient as unknown as KubernetesClient,
         [mockSourceA],
-        createMockConfig(),
+        createMockConfig() as Config,
       );
       await sync.runSync();
 
@@ -117,23 +118,19 @@ describe("SecretSync", () => {
       });
 
       const sync = new SecretSync(
-        mockK8sClient as any,
+        mockK8sClient as unknown as KubernetesClient,
         [mockSourceA, mockSourceB],
-        createMockConfig(),
+        createMockConfig() as Config,
       );
       await sync.runSync();
 
       expect(mockUpsertSecret).toHaveBeenCalledTimes(3);
-      expect(mockUpsertSecret).toHaveBeenCalledWith(
-        "default",
-        "secret-a",
-        { key: "val-a" },
-      );
-      expect(mockUpsertSecret).toHaveBeenCalledWith(
-        "default",
-        "secret-b",
-        { key: "val-b" },
-      );
+      expect(mockUpsertSecret).toHaveBeenCalledWith("default", "secret-a", {
+        key: "val-a",
+      });
+      expect(mockUpsertSecret).toHaveBeenCalledWith("default", "secret-b", {
+        key: "val-b",
+      });
       expect(mockUpsertSecret).toHaveBeenCalledWith(
         "production",
         "prod-db-pass",
@@ -162,9 +159,9 @@ describe("SecretSync", () => {
       });
 
       const sync = new SecretSync(
-        mockK8sClient as any,
+        mockK8sClient as unknown as KubernetesClient,
         [mockSourceA, mockSourceB],
-        createMockConfig(),
+        createMockConfig() as Config,
       );
       await sync.runSync();
 
@@ -184,9 +181,9 @@ describe("SecretSync", () => {
       ]);
 
       const sync = new SecretSync(
-        mockK8sClient as any,
+        mockK8sClient as unknown as KubernetesClient,
         [mockSourceA],
-        createMockConfig(),
+        createMockConfig() as Config,
       );
       await sync.runSync();
 
@@ -200,9 +197,9 @@ describe("SecretSync", () => {
       );
 
       const sync = new SecretSync(
-        mockK8sClient as any,
+        mockK8sClient as unknown as KubernetesClient,
         [mockSourceA],
-        createMockConfig(),
+        createMockConfig() as Config,
       );
       // Should not throw
       await expect(sync.runSync()).resolves.toBeUndefined();
@@ -213,9 +210,7 @@ describe("SecretSync", () => {
       mockGetNamespaceSyncRequests.mockResolvedValue([
         {
           namespace: "default",
-          annotations: [
-            { provider: "alibaba-kms", secretNames: ["secret-a"] },
-          ],
+          annotations: [{ provider: "alibaba-kms", secretNames: ["secret-a"] }],
         },
       ]);
 
@@ -224,9 +219,9 @@ describe("SecretSync", () => {
       );
 
       const sync = new SecretSync(
-        mockK8sClient as any,
+        mockK8sClient as unknown as KubernetesClient,
         [mockSourceA],
-        createMockConfig(),
+        createMockConfig() as Config,
       );
       await expect(sync.runSync()).resolves.toBeUndefined();
       // Should not attempt to upsert if fetch failed
@@ -237,9 +232,7 @@ describe("SecretSync", () => {
       mockGetNamespaceSyncRequests.mockResolvedValue([
         {
           namespace: "default",
-          annotations: [
-            { provider: "alibaba-kms", secretNames: ["secret-a"] },
-          ],
+          annotations: [{ provider: "alibaba-kms", secretNames: ["secret-a"] }],
         },
       ]);
 
@@ -252,9 +245,9 @@ describe("SecretSync", () => {
       mockUpsertSecret.mockRejectedValue(new Error("K8s API error"));
 
       const sync = new SecretSync(
-        mockK8sClient as any,
+        mockK8sClient as unknown as KubernetesClient,
         [mockSourceA],
-        createMockConfig(),
+        createMockConfig() as Config,
       );
       await expect(sync.runSync()).resolves.toBeUndefined();
     });
@@ -284,9 +277,9 @@ describe("SecretSync", () => {
       mockDeleteSecret.mockResolvedValue(undefined);
 
       const sync = new SecretSync(
-        mockK8sClient as any,
+        mockK8sClient as unknown as KubernetesClient,
         [mockSourceA],
-        createMockConfig(true),
+        createMockConfig(true) as Config,
       );
       await sync.runSync();
 
@@ -303,9 +296,9 @@ describe("SecretSync", () => {
       mockListManagedSecrets.mockResolvedValue([]);
 
       const sync = new SecretSync(
-        mockK8sClient as any,
+        mockK8sClient as unknown as KubernetesClient,
         [mockSourceA],
-        createMockConfig("true"),
+        { DELETE_ORPHANED_SECRETS: "true" } as unknown as Config,
       );
       await sync.runSync();
 
@@ -317,9 +310,9 @@ describe("SecretSync", () => {
       mockListManagedSecrets.mockResolvedValue([]);
 
       const sync = new SecretSync(
-        mockK8sClient as any,
+        mockK8sClient as unknown as KubernetesClient,
         [mockSourceA],
-        createMockConfig("1"),
+        { DELETE_ORPHANED_SECRETS: "1" } as unknown as Config,
       );
       await sync.runSync();
 
@@ -330,9 +323,9 @@ describe("SecretSync", () => {
       mockGetNamespaceSyncRequests.mockResolvedValue([]);
 
       const sync = new SecretSync(
-        mockK8sClient as any,
+        mockK8sClient as unknown as KubernetesClient,
         [mockSourceA],
-        createMockConfig(false),
+        createMockConfig(false) as Config,
       );
       await sync.runSync();
 
@@ -341,15 +334,13 @@ describe("SecretSync", () => {
     });
 
     it("should skip orphan cleanup when namespace listing failed", async () => {
-      mockGetNamespaceSyncRequests.mockRejectedValue(
-        new Error("API error"),
-      );
+      mockGetNamespaceSyncRequests.mockRejectedValue(new Error("API error"));
       mockListManagedSecrets.mockResolvedValue([]);
 
       const sync = new SecretSync(
-        mockK8sClient as any,
+        mockK8sClient as unknown as KubernetesClient,
         [mockSourceA],
-        createMockConfig(true),
+        createMockConfig(true) as Config,
       );
       await sync.runSync();
 
@@ -382,9 +373,9 @@ describe("SecretSync", () => {
       mockDeleteSecret.mockRejectedValue(new Error("Delete failed"));
 
       const sync = new SecretSync(
-        mockK8sClient as any,
+        mockK8sClient as unknown as KubernetesClient,
         [mockSourceA],
-        createMockConfig(true),
+        createMockConfig(true) as Config,
       );
       // Should not throw, just log the error
       await expect(sync.runSync()).resolves.toBeUndefined();

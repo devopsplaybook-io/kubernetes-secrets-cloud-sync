@@ -1,6 +1,5 @@
 import { Config } from "../Config";
 import { ResticSource } from "./ResticSource";
-import { SecretFetchResult } from "../types";
 
 // We need to access private methods for testing
 interface ResticSourceTest {
@@ -10,8 +9,9 @@ interface ResticSourceTest {
 }
 
 jest.mock("child_process", () => {
-  const mockEventEmitter = () => {
-    const ee: any = {};
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const mockEventEmitter = (): Record<string, any> => {
+    const ee: Record<string, any> = {};
     ee.on = jest.fn((event: string, handler: (...args: unknown[]) => void) => {
       if (!ee._handlers) ee._handlers = {};
       ee._handlers[event] = handler;
@@ -120,50 +120,43 @@ describe("ResticSource", () => {
 
   describe("parseExtraOptions", () => {
     it("should return empty array for undefined", () => {
-      const result = (
-        source as unknown as ResticSourceTest
-      ).parseExtraOptions(undefined);
+      const result = (source as unknown as ResticSourceTest).parseExtraOptions(
+        undefined,
+      );
       expect(result).toEqual([]);
     });
 
     it("should return empty array for empty string", () => {
-      const result = (
-        source as unknown as ResticSourceTest
-      ).parseExtraOptions("");
+      const result = (source as unknown as ResticSourceTest).parseExtraOptions(
+        "",
+      );
       expect(result).toEqual([]);
     });
 
     it("should split unquoted options by whitespace", () => {
-      const result = (
-        source as unknown as ResticSourceTest
-      ).parseExtraOptions("--option1 value1 --option2 value2");
-      expect(result).toEqual([
-        "--option1",
-        "value1",
-        "--option2",
-        "value2",
-      ]);
+      const result = (source as unknown as ResticSourceTest).parseExtraOptions(
+        "--option1 value1 --option2 value2",
+      );
+      expect(result).toEqual(["--option1", "value1", "--option2", "value2"]);
     });
 
     it("should handle double-quoted options", () => {
-      const result = (
-        source as unknown as ResticSourceTest
-      ).parseExtraOptions('--option "value with spaces"');
+      const result = (source as unknown as ResticSourceTest).parseExtraOptions(
+        '--option "value with spaces"',
+      );
       expect(result).toEqual(["--option", "value with spaces"]);
     });
 
     it("should handle single-quoted options", () => {
-      const result = (
-        source as unknown as ResticSourceTest
-      ).parseExtraOptions("--option 'value with spaces'");
+      const result = (source as unknown as ResticSourceTest).parseExtraOptions(
+        "--option 'value with spaces'",
+      );
       expect(result).toEqual(["--option", "value with spaces"]);
     });
 
     it("should handle mixed options", () => {
-      const result = (
-        source as unknown as ResticSourceTest
-      ).parseExtraOptions(
-        '--option1 val1 --option2 "quoted val" --option3 \'also quoted\'',
+      const result = (source as unknown as ResticSourceTest).parseExtraOptions(
+        "--option1 val1 --option2 \"quoted val\" --option3 'also quoted'",
       );
       expect(result).toEqual([
         "--option1",
@@ -176,17 +169,10 @@ describe("ResticSource", () => {
     });
 
     it("should handle multiple quotes of the same type", () => {
-      const result = (
-        source as unknown as ResticSourceTest
-      ).parseExtraOptions(
+      const result = (source as unknown as ResticSourceTest).parseExtraOptions(
         '-o "first value" -p "second value"',
       );
-      expect(result).toEqual([
-        "-o",
-        "first value",
-        "-p",
-        "second value",
-      ]);
+      expect(result).toEqual(["-o", "first value", "-p", "second value"]);
     });
   });
 

@@ -1,4 +1,4 @@
-import { BaseSecretSource } from "./SecretSource";
+import { BaseSecretSource } from "./sources/SecretSource";
 import { SecretFetchResult } from "./types";
 
 class TestSecretSource extends BaseSecretSource {
@@ -32,7 +32,14 @@ describe("BaseSecretSource", () => {
         c: undefined,
         d: "world",
       };
-      const result = (source as unknown as { validateSecretData(secretName: string, raw: Record<string, unknown>): Record<string, string> }).validateSecretData("test", raw);
+      const result = (
+        source as unknown as {
+          validateSecretData(
+            secretName: string,
+            raw: Record<string, unknown>,
+          ): Record<string, string>;
+        }
+      ).validateSecretData("test", raw);
       expect(result).toEqual({ a: "hello", d: "world" });
     });
 
@@ -41,7 +48,14 @@ describe("BaseSecretSource", () => {
         num: 123,
         bool: true,
       };
-      const result = (source as unknown as { validateSecretData(secretName: string, raw: Record<string, unknown>): Record<string, string> }).validateSecretData("test", raw);
+      const result = (
+        source as unknown as {
+          validateSecretData(
+            secretName: string,
+            raw: Record<string, unknown>,
+          ): Record<string, string>;
+        }
+      ).validateSecretData("test", raw);
       expect(result).toEqual({
         num: "123",
         bool: "true",
@@ -49,7 +63,14 @@ describe("BaseSecretSource", () => {
     });
 
     it("should handle empty input", () => {
-      const result = (source as unknown as { validateSecretData(secretName: string, raw: Record<string, unknown>): Record<string, string> }).validateSecretData("test", {});
+      const result = (
+        source as unknown as {
+          validateSecretData(
+            secretName: string,
+            raw: Record<string, unknown>,
+          ): Record<string, string>;
+        }
+      ).validateSecretData("test", {});
       expect(result).toEqual({});
     });
   });
