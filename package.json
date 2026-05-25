@@ -6,8 +6,8 @@
   "scripts": {
     "//": "-------------------------------------------------------------------",
     "build": "tsc",
-    "lint": "eslint src || true",
-    "test": "jest --coverage || true",
+    "lint": "eslint src",
+    "test": "jest --coverage",
     "////": "-----------------------------------------------------------------",
     "dev": "ts-node-dev ./src/App.ts",
     "dev:test": "NODE_ENV=dev jest --watch --config='jest.config.js'"
@@ -32,6 +32,7 @@
     "@types/node": "^25.9.1",
     "eslint": "^10.4.0",
     "sinon": "^22.0.0",
+    "ts-jest": "^29.4.11",
     "ts-node": "^10.9.2",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.59.4"
