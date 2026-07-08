@@ -23,4 +23,4 @@ COPY package.json /opt/app/package.json
 
 WORKDIR /opt/app
 
-CMD ["dist/App.js"]
+CMD ["node", "dist/App.js"]

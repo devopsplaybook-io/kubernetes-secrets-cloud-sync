@@ -73,7 +73,20 @@ export class AlibabaKmsSource extends BaseSecretSource {
     }
 
     // Parse the JSON secret data
-    const raw = JSON.parse(response.body.secretData) as Record<string, unknown>;
+    let raw: Record<string, unknown>;
+    try {
+      raw = JSON.parse(response.body.secretData) as Record<string, unknown>;
+    } catch (err) {
+      const error = new Error(
+        `Secret ${secretName} data is not valid JSON: ${err}`,
+      );
+      (error as Error & { cause?: unknown }).cause = err;
+      throw error;
+    }
+
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      throw new Error(`Secret ${secretName} data must be a JSON object`);
+    }
     logger.info(
       `Secret fetched: ${secretName} (${Object.keys(raw).length} keys)`,
     );
