@@ -32,7 +32,6 @@ export function OTelLogger(): StandardLogger {
   return logger;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function OTelRequestSpan(req: any): Span {
   return req.tracerSpanApi;
 }

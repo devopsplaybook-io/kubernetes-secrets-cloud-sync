@@ -9,7 +9,6 @@ const logger = OTelLogger().createModuleLogger("kubernetes-client");
  * Kubernetes API client for namespace and secret operations.
  */
 export class KubernetesClient {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private k8sApi: any;
   private readonly annotationPrefix: string;
   public readonly secretNamePrefix: string;

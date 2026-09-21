@@ -49,7 +49,7 @@ export class Config implements ConfigOTelInterface {
       if (pkg && pkg.version) {
         version = pkg.version;
       }
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      // oxlint-disable-next-line no-unused-vars
     } catch (e) {
       // fallback to default "1"
     }
@@ -60,7 +60,6 @@ export class Config implements ConfigOTelInterface {
     const content = await fse.readJson(this.CONFIG_FILE);
     const setIfSet = (field: string, displayLog = true) => {
       let fromEnv = "defaults";
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const self = this as Record<string, any>;
       if (process.env[field] !== undefined) {
         self[field] = process.env[field];

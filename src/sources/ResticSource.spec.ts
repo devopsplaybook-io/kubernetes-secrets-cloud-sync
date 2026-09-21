@@ -9,7 +9,6 @@ interface ResticSourceTest {
 }
 
 jest.mock("child_process", () => {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const mockEventEmitter = (): Record<string, any> => {
     const ee: Record<string, any> = {};
     ee.on = jest.fn((event: string, handler: (...args: unknown[]) => void) => {

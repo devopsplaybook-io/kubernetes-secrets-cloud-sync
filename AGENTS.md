@@ -29,10 +29,10 @@ kubernetes-secrets-cloud-sync/
 
 - **Language**: TypeScript (strict mode off, ES2020 target, CommonJS modules)
 - **Runtime**: Node.js 24
-- **Build**: `tsc` compiles `src/` to `dist/`
-- **Dev mode**: `ts-node-dev ./src/App.ts`
-- **Tests**: Jest with `ts-jest`, spec files named `*.spec.ts` alongside source, run with `npm test`
-- **Linting**: ESLint with `typescript-eslint` (strict + stylistic configs), spec files ignored
+- **Build**: `tsc` compiles `src/` to `dist/` (build also type-checks spec files via `tsconfig.spec.json`)
+- **Dev mode**: `tsx watch ./src/App.ts`
+- **Tests**: Jest with `@swc/jest` transform (v8 coverage provider), spec files named `*.spec.ts` alongside source, run with `npm test`
+- **Linting**: oxlint (recommended preset), run with `npm run lint`
 - **Config loading**: `config.json` values overridable via environment variables (env takes precedence)
 - **Secrets in logs**: Sensitive config values (access keys, passwords) must be logged as `********************`, never in plain text
 - **Error handling**: All async operations must have try/catch with proper error logging. Caught errors re-thrown as new errors must preserve the original via `cause`
@@ -103,7 +103,7 @@ After any code change, run:
 
 ```bash
 npm run build    # TypeScript compilation
-npm run lint     # ESLint check
+npm run lint     # oxlint check
 npm test         # Jest tests with coverage
 ```
 
