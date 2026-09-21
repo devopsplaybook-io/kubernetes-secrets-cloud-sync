@@ -1,5 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
-/* eslint-disable @typescript-eslint/no-extraneous-class */
 /**
  * Type declarations for Alibaba Cloud SDK packages.
  * These packages ship .d.ts files but don't reference them in package.json.
