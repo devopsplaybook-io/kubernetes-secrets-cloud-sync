@@ -1,5 +1,5 @@
 # BUILD
-FROM node:24-alpine as builder
+FROM node:26-alpine as builder
 
 WORKDIR /opt/src
 
@@ -12,7 +12,7 @@ RUN npm ci && \
 
 
 # RUN
-FROM node:24-alpine
+FROM node:26-alpine
 
 RUN apk add --no-cache restic
 

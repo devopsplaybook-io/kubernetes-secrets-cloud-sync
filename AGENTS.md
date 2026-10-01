@@ -22,13 +22,13 @@ kubernetes-secrets-cloud-sync/
       AwsSecretsManagerSource.ts# AWS Secrets Manager implementation
       ResticSource.ts           # Restic snapshot-based secret source
   config.json                   # Default runtime configuration
-  Dockerfile                    # Multi-stage build (node:24-alpine + restic CLI)
+  Dockerfile                    # Multi-stage build (node:26-alpine + restic CLI)
 ```
 
 ## Coding Conventions
 
 - **Language**: TypeScript (strict mode off, ES2020 target, CommonJS modules)
-- **Runtime**: Node.js 24
+- **Runtime**: Node.js 26
 - **Build**: `tsc` compiles `src/` to `dist/` (build also type-checks spec files via `tsconfig.spec.json`)
 - **Dev mode**: `tsx watch ./src/App.ts`
 - **Tests**: Jest with `@swc/jest` transform (v8 coverage provider), spec files named `*.spec.ts` alongside source, run with `npm test`
@@ -93,7 +93,7 @@ Boolean config values accept `true`, `"true"`, or `"1"` (string or boolean).
 
 ## Docker
 
-- Multi-stage build: `node:24-alpine` builder compiles TypeScript, runtime stage includes `restic` CLI
+- Multi-stage build: `node:26-alpine` builder compiles TypeScript, runtime stage includes `restic` CLI
 - Runtime command: `node dist/App.js`
 - Restic binary is installed in the runtime image for the Restic secret source
 
