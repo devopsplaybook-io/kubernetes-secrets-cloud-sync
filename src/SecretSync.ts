@@ -16,6 +16,7 @@ const PREVIEW_LIMIT = 20;
 interface FetchRequest {
   provider: string;
   secretName: string;
+  source: SecretSource;
 }
 
 interface UpsertTarget {
@@ -26,11 +27,9 @@ interface UpsertTarget {
   fetchKey: string;
 }
 
-interface FetchOutcome {
-  ok: boolean;
-  result?: SecretFetchResult;
-  error?: unknown;
-}
+type FetchOutcome =
+  | { ok: true; result: SecretFetchResult }
+  | { ok: false; error: unknown };
 
 /**
  * Orchestrates the secret sync process.
@@ -170,6 +169,7 @@ export class SecretSync {
               fetchRequests.set(fetchKey, {
                 provider: annotation.provider,
                 secretName,
+                source,
               });
             }
             const targetKey = `${request.namespace}\0${k8sSecretName}`;
@@ -234,7 +234,7 @@ export class SecretSync {
           [...fetchRequests.entries()],
           this.getConcurrency(this.config.SYNC_FETCH_CONCURRENCY),
           async ([fetchKey, request]) => {
-            const source = this.sources.get(request.provider);
+            const source = request.source;
             const fetchSpan = OTelStartSpan(
               "source-fetch",
               {

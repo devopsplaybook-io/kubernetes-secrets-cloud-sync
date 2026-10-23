@@ -83,15 +83,18 @@ export class ResticSource extends BaseSecretSource {
         throw new Error("restic snapshots returned no snapshots");
       }
 
-      let newest: ResticSnapshot | undefined;
-      for (const candidate of snapshots as ResticSnapshot[]) {
-        if (!candidate || typeof candidate.id !== "string" || !candidate.id) {
-          continue;
-        }
-        if (!newest) {
-          newest = candidate;
-          continue;
-        }
+      const usable = (snapshots as ResticSnapshot[]).filter(
+        (candidate): candidate is ResticSnapshot & { id: string } =>
+          !!candidate &&
+          typeof candidate.id === "string" &&
+          candidate.id.length > 0,
+      );
+      if (usable.length === 0) {
+        throw new Error("restic snapshots returned no usable snapshot id");
+      }
+
+      let newest = usable[0];
+      for (const candidate of usable.slice(1)) {
         const candidateTime = Date.parse(candidate.time ?? "");
         const newestTime = Date.parse(newest.time ?? "");
         if (
@@ -102,9 +105,6 @@ export class ResticSource extends BaseSecretSource {
         ) {
           newest = candidate;
         }
-      }
-      if (!newest) {
-        throw new Error("restic snapshots returned no usable snapshot id");
       }
 
       this.snapshotId = newest.id;

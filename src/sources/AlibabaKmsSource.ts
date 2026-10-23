@@ -131,9 +131,13 @@ export class AlibabaKmsSource extends BaseSecretSource {
     runtime: RuntimeOptions,
     secretName: string,
   ): Promise<Awaited<ReturnType<Kms20160120["getSecretValueWithOptions"]>>> {
+    const client = this.client;
+    if (!client) {
+      throw new Error("Alibaba KMS client not initialized");
+    }
     for (let attempt = 1; ; attempt++) {
       try {
-        return await this.client.getSecretValueWithOptions(request, runtime);
+        return await client.getSecretValueWithOptions(request, runtime);
       } catch (error: unknown) {
         if (attempt >= MAX_ATTEMPTS || !this.isRetryable(error)) {
           throw error;

@@ -26,7 +26,7 @@ describe("SecretSync", () => {
   };
 
   // Mock secret sources
-  const mockSourceA: jest.Mocked<SecretSource> = {
+  const mockSourceA: jest.Mocked<Required<SecretSource>> = {
     providerName: "alibaba-kms",
     init: jest.fn(),
     fetchSecret: jest.fn(),
@@ -35,7 +35,7 @@ describe("SecretSync", () => {
     endCycle: jest.fn(),
   };
 
-  const mockSourceB: jest.Mocked<SecretSource> = {
+  const mockSourceB: jest.Mocked<Required<SecretSource>> = {
     providerName: "aws-secretsmanager",
     init: jest.fn(),
     fetchSecret: jest.fn(),

@@ -20,7 +20,11 @@ export function maskUrlUserinfo(value: string): string {
     .replace(/\b(sftp|async):([^/@\s]+)@/g, "$1:***@");
 }
 
-function replaceLiteral(text: string, literal: string, replacement: string): string {
+function replaceLiteral(
+  text: string,
+  literal: string | undefined,
+  replacement: string,
+): string {
   if (!literal) {
     return text;
   }

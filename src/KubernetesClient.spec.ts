@@ -32,8 +32,33 @@ jest.mock("@kubernetes/client-node", () => {
       };
     }
   }
-  return { KubeConfig: MockKubeConfig, CoreV1Api: {} };
+  class MockApiException extends Error {
+    code: number;
+    body: unknown;
+    headers: Record<string, string>;
+    constructor(
+      code: number,
+      message: string,
+      body: unknown,
+      headers: Record<string, string>,
+    ) {
+      super(message);
+      this.code = code;
+      this.body = body;
+      this.headers = headers;
+    }
+  }
+  return { KubeConfig: MockKubeConfig, CoreV1Api: {}, ApiException: MockApiException };
 });
+
+const { ApiException } = jest.requireMock("@kubernetes/client-node") as {
+  ApiException: new (
+    code: number,
+    message: string,
+    body: unknown,
+    headers: Record<string, string>,
+  ) => Error;
+};
 
 const NOT_FOUND = Object.assign(new Error("Not Found"), { code: 404 });
 const CONFLICT = Object.assign(new Error("Conflict"), { code: 409 });
@@ -614,6 +639,22 @@ describe("KubernetesClient", () => {
       ).rejects.toThrow("Forbidden");
       expect(mockCreateNamespacedSecret).not.toHaveBeenCalled();
       expect(mockPatchNamespacedSecret).not.toHaveBeenCalled();
+    });
+
+    it("treats a Kubernetes ApiException 404 as not found", async () => {
+      mockGetNamespacedSecret.mockRejectedValue(
+        new ApiException(404, "Not Found", {}, {}),
+      );
+      mockCreateNamespacedSecret.mockResolvedValue({});
+
+      await client.upsertSecret("default", "my-secret", { key: "value" });
+
+      expect(mockCreateNamespacedSecret).toHaveBeenCalledWith({
+        namespace: "default",
+        body: expect.objectContaining({
+          metadata: expect.objectContaining({ name: "cloudsync-my-secret" }),
+        }),
+      });
     });
   });
 

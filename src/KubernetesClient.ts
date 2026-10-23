@@ -590,10 +590,20 @@ export class KubernetesClient {
   }
 
   private getErrorStatusCode(error: unknown): number | undefined {
-    return (
-      (error as { code?: number })?.code ||
-      (error as { response?: { statusCode?: number } })?.response?.statusCode ||
-      (error as { statusCode?: number })?.statusCode
-    );
+    if (error instanceof k8s.ApiException) {
+      return error.code;
+    }
+    const fallback = error as {
+      code?: unknown;
+      statusCode?: unknown;
+      response?: { statusCode?: unknown };
+    };
+    const statusCode =
+      typeof fallback?.code === "number"
+        ? fallback.code
+        : typeof fallback?.statusCode === "number"
+          ? fallback.statusCode
+          : fallback?.response?.statusCode;
+    return typeof statusCode === "number" ? statusCode : undefined;
   }
 }
