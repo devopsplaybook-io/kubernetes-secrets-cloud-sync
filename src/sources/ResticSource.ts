@@ -1,7 +1,8 @@
 import { spawn } from "child_process";
 import { BaseSecretSource } from "./SecretSource";
 import { Config } from "../Config";
-import { OTelLogger } from "../OTelContext";
+import { OTelLogger, toError } from "../OTelContext";
+import { maskUrlUserinfo, sanitizeResticOutput } from "../Redaction";
 import { SecretFetchResult } from "../types";
 
 const logger = OTelLogger().createModuleLogger("restic-source");
@@ -52,10 +53,10 @@ export class ResticSource extends BaseSecretSource {
     try {
       await this.runRestic(["version"]);
       logger.info(
-        `Restic source initialized (repository: ${this.config.RESTIC_REPOSITORY})`,
+        `Restic source initialized (repository: ${maskUrlUserinfo(this.config.RESTIC_REPOSITORY)})`,
       );
     } catch (error) {
-      logger.error(`Restic CLI not available: ${error}`);
+      logger.error("Restic CLI not available", toError(error));
     }
   }
 
@@ -114,7 +115,8 @@ export class ResticSource extends BaseSecretSource {
       this.cycleError =
         error instanceof Error ? error : new Error(String(error));
       logger.error(
-        `Failed to resolve the restic snapshot; restic secrets will fail this cycle: ${this.cycleError}`,
+        "Failed to resolve the restic snapshot; restic secrets will fail this cycle",
+        this.cycleError,
       );
     }
   }
@@ -246,6 +248,19 @@ export class ResticSource extends BaseSecretSource {
     return Math.floor(retries);
   }
 
+  /** Strip repository credentials from arbitrary restic output. */
+  private sanitizeOutput(text: string): string {
+    return sanitizeResticOutput(text, {
+      repository: this.config.RESTIC_REPOSITORY,
+      password: this.config.RESTIC_PASSWORD,
+      options: this.config.RESTIC_OPTIONS,
+    });
+  }
+
+  private sanitizeError(error: unknown): string {
+    return this.sanitizeOutput(toError(error).message);
+  }
+
   private async runRestic(args: string[]): Promise<string> {
     const retries = this.getRetries();
     let lastError: unknown;
@@ -262,7 +277,7 @@ export class ResticSource extends BaseSecretSource {
         const delay =
           RETRY_BASE_DELAY_MS * 2 ** attempt + Math.floor(Math.random() * 250);
         logger.warn(
-          `restic ${args[0]} failed (attempt ${attempt + 1}/${retries + 1}), retrying in ${delay}ms: ${error}`,
+          `restic ${args[0]} failed (attempt ${attempt + 1}/${retries + 1}), retrying in ${delay}ms: ${this.sanitizeError(error)}`,
         );
         await new Promise((resolve) => setTimeout(resolve, delay));
       }
@@ -326,7 +341,7 @@ export class ResticSource extends BaseSecretSource {
           } else {
             reject(
               new Error(
-                `restic ${args[0]} exited with code ${code}: ${stderr.trim() || stdout.trim()}`,
+                `restic ${args[0]} exited with code ${code}: ${this.sanitizeOutput(stderr.trim() || stdout.trim())}`,
               ),
             );
           }

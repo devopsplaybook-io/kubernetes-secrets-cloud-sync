@@ -29,6 +29,9 @@ describe("Config", () => {
     delete process.env.DELETE_ORPHANED_SECRETS;
     delete process.env.ORPHAN_CLEANUP_DRY_RUN;
     delete process.env.ORPHAN_CLEANUP_MAX_DELETIONS;
+    delete process.env.SYNC_ALLOWED_PARTIAL_FAILURES;
+    delete process.env.RESTIC_REPOSITORY;
+    delete process.env.RESTIC_PASSWORD;
   });
 
   afterEach(() => {
@@ -68,6 +71,7 @@ describe("Config", () => {
       expect(config.RESTIC_RETRIES).toBe(2);
       expect(config.SYNC_FETCH_CONCURRENCY).toBe(4);
       expect(config.SYNC_WRITE_CONCURRENCY).toBe(4);
+      expect(config.SYNC_ALLOWED_PARTIAL_FAILURES).toBe(0);
     });
   });
 
@@ -249,6 +253,52 @@ describe("Config", () => {
       await config.reload();
       expect(config.ORPHAN_CLEANUP_DRY_RUN).toBe("true");
       expect(config.ORPHAN_CLEANUP_MAX_DELETIONS).toBe("7");
+    });
+
+    it("should load SYNC_ALLOWED_PARTIAL_FAILURES with a zero default", async () => {
+      mockReadJson.mockResolvedValue({});
+      const config = new Config();
+      await config.reload();
+      expect(config.SYNC_ALLOWED_PARTIAL_FAILURES).toBe(0);
+    });
+
+    it("should parse and clamp SYNC_ALLOWED_PARTIAL_FAILURES", async () => {
+      mockReadJson.mockResolvedValue({ SYNC_ALLOWED_PARTIAL_FAILURES: 3 });
+      const config = new Config();
+      await config.reload();
+      expect(config.SYNC_ALLOWED_PARTIAL_FAILURES).toBe(3);
+
+      process.env.SYNC_ALLOWED_PARTIAL_FAILURES = "20000";
+      await config.reload();
+      expect(config.SYNC_ALLOWED_PARTIAL_FAILURES).toBe(10000);
+
+      process.env.SYNC_ALLOWED_PARTIAL_FAILURES = "-1";
+      await config.reload();
+      expect(config.SYNC_ALLOWED_PARTIAL_FAILURES).toBe(0);
+    });
+
+    it("should mask RESTIC_REPOSITORY in the configuration log", async () => {
+      const logSpy = jest
+        .spyOn(console, "log")
+        .mockImplementation(() => undefined);
+      mockReadJson.mockResolvedValue({
+        RESTIC_REPOSITORY: "s3:https://user:secret@example.com/repo",
+      });
+
+      const config = new Config();
+      await config.reload();
+
+      expect(config.RESTIC_REPOSITORY).toBe(
+        "s3:https://user:secret@example.com/repo",
+      );
+      const logs = logSpy.mock.calls.map((call) => call.join(" "));
+      expect(
+        logs.some((line) =>
+          line.includes("RESTIC_REPOSITORY: ********************"),
+        ),
+      ).toBe(true);
+      expect(logs.some((line) => line.includes("user:secret"))).toBe(false);
+      logSpy.mockRestore();
     });
   });
 });

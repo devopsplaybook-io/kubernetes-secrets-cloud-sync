@@ -1,5 +1,6 @@
 import { Config } from "./Config";
 import { KubernetesClient, hashSecretData } from "./KubernetesClient";
+import { OTelSetTracer } from "./OTelContext";
 import { instanceIdForPrefix, isValidLabelValue, normalizeSecretName } from "./SecretName";
 
 // Mock @kubernetes/client-node
@@ -710,6 +711,116 @@ describe("KubernetesClient", () => {
       await expect(
         client.deleteSecret("default", "no-permission"),
       ).rejects.toThrow("Forbidden");
+    });
+  });
+
+  describe("log noise and tracing", () => {
+    interface FakeSpan {
+      setAttribute: jest.Mock;
+      recordException: jest.Mock;
+      setStatus: jest.Mock;
+      end: jest.Mock;
+    }
+
+    let spans: FakeSpan[];
+    let tracer: { startSpan: jest.Mock; shutdown: jest.Mock };
+
+    beforeEach(() => {
+      spans = [];
+      tracer = {
+        startSpan: jest.fn(() => {
+          const span: FakeSpan = {
+            setAttribute: jest.fn(),
+            recordException: jest.fn(),
+            setStatus: jest.fn(),
+            end: jest.fn(),
+          };
+          spans.push(span);
+          return span;
+        }),
+        shutdown: jest.fn(async () => undefined),
+      };
+      OTelSetTracer(tracer as never);
+    });
+
+    afterEach(() => {
+      OTelSetTracer(undefined as never);
+      jest.restoreAllMocks();
+    });
+
+    it("does not emit one info line per annotated namespace", async () => {
+      const logs: string[] = [];
+      jest.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+        logs.push(args.map(String).join(" "));
+      });
+      mockListNamespace.mockResolvedValue({
+        items: [
+          {
+            metadata: {
+              name: "default",
+              annotations: {
+                "secrets.cloudsync.devopsplaybook.io/alibaba-kms": "secret-a",
+              },
+            },
+          },
+        ],
+      });
+
+      await client.getNamespaceSyncRequests();
+
+      expect(
+        logs.some((line) => line.includes("found 1 sync annotation")),
+      ).toBe(false);
+    });
+
+    it("wraps the namespace listing in a span", async () => {
+      mockListNamespace.mockResolvedValue({ items: [] });
+
+      await client.getNamespaceSyncRequests();
+
+      expect(tracer.startSpan).toHaveBeenCalledWith(
+        "k8s-list-namespaces",
+        undefined,
+        { kind: expect.anything() },
+      );
+      expect(spans[0].end).toHaveBeenCalled();
+    });
+
+    it("records a failed namespace listing as a span exception", async () => {
+      mockListNamespace.mockRejectedValue(new Error("API down"));
+
+      await expect(client.getNamespaceSyncRequests()).rejects.toThrow(
+        "API down",
+      );
+      expect(spans[0].recordException).toHaveBeenCalledWith(expect.any(Error));
+      expect(spans[0].end).toHaveBeenCalled();
+    });
+
+    it("emits child spans for secret get and create", async () => {
+      mockGetNamespacedSecret.mockRejectedValue(NOT_FOUND);
+      mockCreateNamespacedSecret.mockResolvedValue({});
+
+      await client.upsertSecret("default", "my-secret", { key: "value" });
+
+      const names = tracer.startSpan.mock.calls.map((call) => call[0]);
+      expect(names).toEqual(
+        expect.arrayContaining(["k8s-get-secret", "k8s-create-secret"]),
+      );
+      expect(spans.every((span) => span.end.mock.calls.length === 1)).toBe(
+        true,
+      );
+    });
+
+    it("wraps managed secret listing and deletion in spans", async () => {
+      mockListSecretForAllNamespaces.mockResolvedValue({ items: [] });
+      mockDeleteNamespacedSecret.mockResolvedValue({});
+
+      await client.listManagedSecrets();
+      await client.deleteSecret("default", "cloudsync-old");
+
+      const names = tracer.startSpan.mock.calls.map((call) => call[0]);
+      expect(names).toContain("k8s-list-secrets");
+      expect(names).toContain("k8s-delete-secret");
     });
   });
 });

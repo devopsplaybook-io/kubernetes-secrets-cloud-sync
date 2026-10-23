@@ -443,4 +443,85 @@ describe("ResticSource", () => {
       expect(commands).not.toContain("restore");
     });
   });
+
+  describe("credential redaction", () => {
+    beforeEach(() => {
+      config.RESTIC_REPOSITORY =
+        "s3:https://user:secret@example.com/restic-repo";
+      config.RESTIC_PASSWORD = "restic-pass";
+      config.RESTIC_OPTIONS = "--option secret-value";
+      source = new ResticSource(config);
+    });
+
+    it("masks the repository in the initialization log", async () => {
+      const logs: string[] = [];
+      const logSpy = jest
+        .spyOn(console, "log")
+        .mockImplementation((...args: unknown[]) => {
+          logs.push(args.map(String).join(" "));
+        });
+
+      const init = source.init();
+      const child = spawnedChild();
+      child.emit("close", 0);
+      await init;
+
+      expect(
+        logs.some((line) =>
+          line.includes("s3:https://***@example.com/restic-repo"),
+        ),
+      ).toBe(true);
+      expect(logs.some((line) => line.includes("user:secret"))).toBe(false);
+      logSpy.mockRestore();
+    });
+
+    it("sanitizes restic stderr in the thrown error", async () => {
+      const fetch = source.fetchSecret("name-a");
+      const child = spawnedChild();
+      child.stderr.emit(
+        "data",
+        Buffer.from(
+          "Fatal: unable to open s3:https://user:secret@example.com/restic-repo password restic-pass options --option secret-value",
+        ),
+      );
+      child.emit("close", 1);
+
+      const error = (await fetch.catch((err) => err)) as Error;
+      expect(error.message).toContain("restic dump exited with code 1");
+      expect(error.message).toContain("s3:https://***@example.com/restic-repo");
+      expect(error.message).not.toContain("user:secret");
+      expect(error.message).not.toContain("restic-pass");
+      expect(error.message).not.toContain("secret-value");
+    });
+
+    it("sanitizes the retry warning", async () => {
+      jest.useFakeTimers();
+      config.RESTIC_RETRIES = 1;
+      const logs: string[] = [];
+      const logSpy = jest
+        .spyOn(console, "log")
+        .mockImplementation((...args: unknown[]) => {
+          logs.push(args.map(String).join(" "));
+        });
+
+      const fetch = source.fetchSecret("name-a");
+      const first = spawnedChild();
+      first.stderr.emit(
+        "data",
+        Buffer.from(
+          "temporary failure at s3:https://user:secret@example.com/restic-repo restic-pass",
+        ),
+      );
+      first.emit("close", 1);
+
+      await jest.advanceTimersByTimeAsync(0);
+      await jest.advanceTimersByTimeAsync(1000);
+      completeDump({ key: "value" });
+      await expect(fetch).resolves.toMatchObject({ secretName: "name-a" });
+
+      expect(logs.some((line) => line.includes("user:secret"))).toBe(false);
+      expect(logs.some((line) => line.includes("restic-pass"))).toBe(false);
+      logSpy.mockRestore();
+    });
+  });
 });

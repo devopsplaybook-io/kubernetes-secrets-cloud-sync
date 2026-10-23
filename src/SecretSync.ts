@@ -1,10 +1,11 @@
 import { Config } from "./Config";
 import { mapWithConcurrency } from "./Concurrency";
+import { Span } from "@opentelemetry/sdk-trace-base";
 import { SecretSource } from "./sources/SecretSource";
 import { KubernetesClient, ManagedSecret } from "./KubernetesClient";
-import { OTelLogger } from "./OTelContext";
+import { OTelEndSpan, OTelLogger, OTelStartSpan, toError } from "./OTelContext";
 import { normalizeSecretName } from "./SecretName";
-import { SecretFetchResult } from "./types";
+import { SecretFetchResult, SyncRunResult } from "./types";
 
 const logger = OTelLogger().createModuleLogger("secret-sync");
 
@@ -64,24 +65,29 @@ export class SecretSync {
    * 4. Create/update Kubernetes secrets in each namespace (bounded concurrency)
    * 5. Optionally delete managed secrets that no longer match any annotation
    */
-  async runSync(): Promise<void> {
+  async runSync(): Promise<SyncRunResult> {
+    const startedAt = Date.now();
+    const rootSpan = OTelStartSpan("sync-run");
     logger.info("Starting sync cycle");
 
     let namespacesSynced = 0;
     let errors = 0;
     let namespaceListSucceeded = false;
     let uniqueFetches = 0;
+    let succeededSecrets = 0;
     let duplicatesAvoided = 0;
     let created = 0;
     let updated = 0;
     let unchanged = 0;
-    const startedAt = Date.now();
     const expected = new Set<string>();
     const identityByKey = new Map<string, string>();
     const collisionKeys = new Set<string>();
+    const requestedSecretKeys = new Set<string>();
+    const failedNamespaces = new Set<string>();
 
     try {
-      const requests = await this.k8sClient.getNamespaceSyncRequests();
+      const requests =
+        await this.k8sClient.getNamespaceSyncRequests(rootSpan);
       namespaceListSucceeded = true;
       namespacesSynced = requests.length;
       logger.info(
@@ -92,6 +98,7 @@ export class SecretSync {
       for (const request of requests) {
         for (const annotation of request.annotations) {
           for (const secretName of annotation.secretNames) {
+            requestedSecretKeys.add(`${annotation.provider}\0${secretName}`);
             const k8sSecretName = normalizeSecretName(
               secretName,
               this.k8sClient.secretNamePrefix,
@@ -107,6 +114,7 @@ export class SecretSync {
               !collisionKeys.has(key)
             ) {
               collisionKeys.add(key);
+              failedNamespaces.add(request.namespace);
               const [existingProvider, existingSecret] =
                 existingIdentity.split("\0");
               logger.error(
@@ -197,12 +205,27 @@ export class SecretSync {
             continue;
           }
           startedSources.set(provider, source);
+          const beginSpan = OTelStartSpan(
+            "source-begin-cycle",
+            { "source.provider": provider },
+            rootSpan,
+          );
           try {
             await source.beginCycle([...providerNames]);
+            OTelEndSpan(beginSpan);
           } catch (error) {
             errors++;
+            for (const request of requests) {
+              for (const annotation of request.annotations) {
+                if (annotation.provider === provider) {
+                  failedNamespaces.add(request.namespace);
+                }
+              }
+            }
+            OTelEndSpan(beginSpan, error);
             logger.error(
-              `Secret source ${provider} beginCycle failed: ${error}`,
+              `Secret source ${provider} beginCycle failed`,
+              toError(error),
             );
           }
         }
@@ -212,23 +235,42 @@ export class SecretSync {
           this.getConcurrency(this.config.SYNC_FETCH_CONCURRENCY),
           async ([fetchKey, request]) => {
             const source = this.sources.get(request.provider);
+            const fetchSpan = OTelStartSpan(
+              "source-fetch",
+              {
+                "secret.provider": request.provider,
+                "secret.name": request.secretName,
+              },
+              rootSpan,
+            );
             try {
               const result = await source.fetchSecret(request.secretName);
               fetchOutcomes.set(fetchKey, { ok: true, result });
+              fetchSpan?.setAttribute("source.fetch.success", true);
+              OTelEndSpan(fetchSpan);
             } catch (error) {
               fetchOutcomes.set(fetchKey, { ok: false, error });
+              fetchSpan?.setAttribute("source.fetch.success", false);
+              OTelEndSpan(fetchSpan, error);
             }
           },
         );
 
         for (const [fetchKey, outcome] of fetchOutcomes) {
           if (outcome.ok) {
+            succeededSecrets++;
             continue;
           }
           errors++;
+          for (const target of upsertTargets.values()) {
+            if (target.fetchKey === fetchKey) {
+              failedNamespaces.add(target.namespace);
+            }
+          }
           const [provider, secretName] = fetchKey.split("\0");
           logger.error(
-            `Failed to fetch secret ${secretName} from ${provider}: ${outcome.error}`,
+            `Failed to fetch secret ${secretName} from ${provider}`,
+            toError(outcome.error),
           );
         }
 
@@ -238,7 +280,7 @@ export class SecretSync {
           async (target) => {
             const outcome = fetchOutcomes.get(target.fetchKey);
             if (!outcome || !outcome.ok) {
-              errors++;
+              // The fetch failure was already counted once; nothing to write.
               return;
             }
             try {
@@ -246,6 +288,7 @@ export class SecretSync {
                 target.namespace,
                 target.secretName,
                 outcome.result.data,
+                rootSpan,
               );
               if (action === "created") {
                 created++;
@@ -256,24 +299,35 @@ export class SecretSync {
               }
             } catch (error) {
               errors++;
+              failedNamespaces.add(target.namespace);
               logger.error(
-                `Failed to upsert secret ${target.secretName} in namespace ${target.namespace}: ${error}`,
+                `Failed to upsert secret ${target.secretName} in namespace ${target.namespace}`,
+                toError(error),
               );
             }
           },
         );
       } finally {
         for (const [provider, source] of startedSources) {
+          const endSpan = OTelStartSpan(
+            "source-end-cycle",
+            { "source.provider": provider },
+            rootSpan,
+          );
           try {
             await source.endCycle?.();
+            OTelEndSpan(endSpan);
           } catch (error) {
-            logger.warn(`Secret source ${provider} endCycle failed: ${error}`);
+            OTelEndSpan(endSpan, error);
+            logger.warn(
+              `Secret source ${provider} endCycle failed: ${toError(error).message}`,
+            );
           }
         }
       }
     } catch (error) {
       errors++;
-      logger.error(`Failed to list namespaces: ${error}`);
+      logger.error("Failed to list namespaces", toError(error));
     }
 
     const deleteOrphans = this.isTruthy(
@@ -294,14 +348,17 @@ export class SecretSync {
         );
       } else {
         try {
-          orphansDeleted = await this.pruneOrphanedSecrets(
+          const orphanResult = await this.pruneOrphanedSecrets(
             expected,
             dryRun,
             maxDeletions,
+            rootSpan,
           );
+          orphansDeleted = orphanResult.deleted;
+          errors += orphanResult.errors;
         } catch (error) {
           errors++;
-          logger.error(`Failed to prune orphaned secrets: ${error}`);
+          logger.error("Failed to prune orphaned secrets", toError(error));
         }
       }
     }
@@ -311,9 +368,44 @@ export class SecretSync {
         ? "dry-run"
         : "enabled"
       : "disabled";
+    const durationMs = Date.now() - startedAt;
+    const result: SyncRunResult = {
+      namespaces: namespacesSynced,
+      secrets: requestedSecretKeys.size,
+      succeededSecrets,
+      errors,
+      failedNamespaces: [...failedNamespaces].sort(),
+      namespaceListSucceeded,
+      durationMs,
+    };
+
+    if (rootSpan) {
+      rootSpan.setAttribute("sync.namespaces", result.namespaces);
+      rootSpan.setAttribute("sync.secrets", result.secrets);
+      rootSpan.setAttribute("sync.succeeded_secrets", result.succeededSecrets);
+      rootSpan.setAttribute("sync.errors", result.errors);
+      rootSpan.setAttribute(
+        "sync.failed_namespaces",
+        result.failedNamespaces.join(","),
+      );
+      rootSpan.setAttribute("sync.duration_ms", result.durationMs);
+      rootSpan.setAttribute(
+        "sync.namespace_list_succeeded",
+        result.namespaceListSucceeded,
+      );
+    }
+    const spanError = !namespaceListSucceeded
+      ? new Error("Namespace listing failed")
+      : errors > 0
+        ? new Error(`Sync cycle completed with ${errors} error(s)`)
+        : undefined;
+    OTelEndSpan(rootSpan, spanError);
+
     logger.info(
-      `Sync cycle complete (instance ${this.k8sClient.instanceId ?? "unknown"}, orphan cleanup ${cleanupMode}): ${namespacesSynced} namespace(s), ${uniqueFetches} unique fetch(es) (${duplicatesAvoided} duplicate(s) avoided), ${created} created, ${updated} updated, ${unchanged} unchanged, ${orphansDeleted} orphan(s) deleted, ${errors} error(s), ${Date.now() - startedAt} ms`,
+      `Sync cycle complete (instance ${this.k8sClient.instanceId ?? "unknown"}, orphan cleanup ${cleanupMode}): ${namespacesSynced} namespace(s), ${uniqueFetches} unique fetch(es) (${duplicatesAvoided} duplicate(s) avoided), ${created} created, ${updated} updated, ${unchanged} unchanged, ${orphansDeleted} orphan(s) deleted, ${failedNamespaces.size} failed namespace(s), ${errors} error(s), ${durationMs} ms`,
     );
+
+    return result;
   }
 
   private isTruthy(value: string | boolean | undefined): boolean {
@@ -348,8 +440,9 @@ export class SecretSync {
     expected: Set<string>,
     dryRun: boolean,
     maxDeletions: number,
-  ): Promise<number> {
-    const managed = await this.k8sClient.listManagedSecrets();
+    parentSpan?: Span,
+  ): Promise<{ deleted: number; errors: number }> {
+    const managed = await this.k8sClient.listManagedSecrets(parentSpan);
     const orphans: ManagedSecret[] = [];
     for (const secret of managed) {
       const key = `${secret.namespace}/${secret.name}`;
@@ -385,30 +478,33 @@ export class SecretSync {
 
     if (dryRun) {
       logger.info("Orphan cleanup dry run: no secret deleted");
-      return 0;
+      return { deleted: 0, errors: 0 };
     }
 
     if (orphans.length > maxDeletions) {
       logger.error(
         `Orphan cleanup aborted: ${orphans.length} orphan(s) exceed ORPHAN_CLEANUP_MAX_DELETIONS=${maxDeletions}; nothing deleted`,
       );
-      return 0;
+      return { deleted: 0, errors: 0 };
     }
 
     let deleted = 0;
+    let deleteErrors = 0;
     for (const { namespace, name } of orphans) {
       try {
-        await this.k8sClient.deleteSecret(namespace, name);
+        await this.k8sClient.deleteSecret(namespace, name, parentSpan);
         deleted++;
       } catch (error) {
+        deleteErrors++;
         logger.error(
-          `Failed to delete orphaned secret ${namespace}/${name}: ${error}`,
+          `Failed to delete orphaned secret ${namespace}/${name}`,
+          toError(error),
         );
       }
     }
     if (deleted > 0) {
       logger.info(`Orphan cleanup deleted ${deleted} secret(s)`);
     }
-    return deleted;
+    return { deleted, errors: deleteErrors };
   }
 }
