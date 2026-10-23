@@ -1,7 +1,4 @@
 import { spawn } from "child_process";
-import * as fse from "fs-extra";
-import * as os from "os";
-import * as path from "path";
 import { BaseSecretSource } from "./SecretSource";
 import { Config } from "../Config";
 import { OTelLogger } from "../OTelContext";
@@ -9,13 +6,25 @@ import { SecretFetchResult } from "../types";
 
 const logger = OTelLogger().createModuleLogger("restic-source");
 
+/** Secret names and RESTIC_PATH segments must match this pattern. */
+export const RESTIC_NAME_PATTERN = /^[A-Za-z0-9._/-]+$/;
+const RETRY_BASE_DELAY_MS = 500;
+const DEFAULT_TIMEOUT_SECONDS = 120;
+const DEFAULT_RETRIES = 2;
+
+interface ResticSnapshot {
+  id?: string;
+  short_id?: string;
+  time?: string;
+}
+
 /**
  * Restic secret source implementation.
  *
- * For each secret name requested, the source restores the latest snapshot
- * of the configured restic repository into a fresh temporary directory,
- * reads the file named `<secretName>.json` (expected to be a flat JSON
- * object of string key/value pairs), then removes the temporary directory.
+ * A sync cycle resolves the newest snapshot once (`restic snapshots --json`)
+ * and every secret is streamed from that snapshot with `restic dump`
+ * (`/<RESTIC_PATH>/<secretName>.json`). No full-snapshot restore and no
+ * temporary plaintext files are involved.
  *
  * Annotation key: secrets.cloudsync.devopsplaybook.io/restic
  * Annotation value: comma-separated list of secret names (each maps to
@@ -24,6 +33,8 @@ const logger = OTelLogger().createModuleLogger("restic-source");
 export class ResticSource extends BaseSecretSource {
   readonly providerName = "restic";
   private readonly config: Config;
+  private snapshotId?: string;
+  private cycleError?: Error;
 
   constructor(config: Config) {
     super();
@@ -48,75 +59,121 @@ export class ResticSource extends BaseSecretSource {
     }
   }
 
+  /**
+   * Resolve the newest snapshot for the upcoming cycle. Failures are recorded
+   * and re-thrown per secret by `fetchSecret`, so a broken repository does not
+   * spawn one restic process per requested secret.
+   */
+  async beginCycle(secretNames: string[]): Promise<void> {
+    this.snapshotId = undefined;
+    this.cycleError = undefined;
+
+    try {
+      const stdout = await this.runRestic(["snapshots", "--json"]);
+      let snapshots: unknown;
+      try {
+        snapshots = JSON.parse(stdout);
+      } catch (err) {
+        const error = new Error(`restic snapshots returned invalid JSON: ${err}`);
+        (error as Error & { cause?: unknown }).cause = err;
+        throw error;
+      }
+      if (!Array.isArray(snapshots) || snapshots.length === 0) {
+        throw new Error("restic snapshots returned no snapshots");
+      }
+
+      let newest: ResticSnapshot | undefined;
+      for (const candidate of snapshots as ResticSnapshot[]) {
+        if (!candidate || typeof candidate.id !== "string" || !candidate.id) {
+          continue;
+        }
+        if (!newest) {
+          newest = candidate;
+          continue;
+        }
+        const candidateTime = Date.parse(candidate.time ?? "");
+        const newestTime = Date.parse(newest.time ?? "");
+        if (
+          Number.isFinite(candidateTime) &&
+          (!Number.isFinite(newestTime) ||
+            candidateTime > newestTime ||
+            (candidateTime === newestTime && candidate.id > newest.id))
+        ) {
+          newest = candidate;
+        }
+      }
+      if (!newest) {
+        throw new Error("restic snapshots returned no usable snapshot id");
+      }
+
+      this.snapshotId = newest.id;
+      logger.info(
+        `Resolved restic snapshot ${(newest.short_id ?? newest.id).slice(0, 8)} (${newest.time ?? "unknown time"}) for ${secretNames.length} secret name(s)`,
+      );
+    } catch (error) {
+      this.cycleError =
+        error instanceof Error ? error : new Error(String(error));
+      logger.error(
+        `Failed to resolve the restic snapshot; restic secrets will fail this cycle: ${this.cycleError}`,
+      );
+    }
+  }
+
+  endCycle(): void {
+    this.snapshotId = undefined;
+    this.cycleError = undefined;
+  }
+
   async fetchSecret(secretName: string): Promise<SecretFetchResult> {
     if (!this.isAvailable()) {
       throw new Error("Restic source not configured");
     }
+    if (this.cycleError) {
+      throw this.cycleError;
+    }
 
-    const tempDir = await fse.mkdtemp(
-      path.join(os.tmpdir(), "restic-secrets-"),
+    this.validateRelativePath(secretName, "restic secret name");
+    const subPath = this.normalizePath(this.config.RESTIC_PATH);
+    if (subPath) {
+      this.validateRelativePath(subPath, "RESTIC_PATH");
+    }
+    const relative = subPath ? `${subPath}/${secretName}` : secretName;
+    this.validateRelativePath(relative, "restic secret path");
+    const includePattern = `/${relative}.json`;
+
+    logger.info(
+      `Fetching secret ${secretName} from restic snapshot ${this.snapshotId ?? "latest"} (dump: ${includePattern})`,
     );
 
+    const stdout = await this.runRestic([
+      "dump",
+      this.snapshotId ?? "latest",
+      includePattern,
+    ]);
+
+    let parsed: unknown;
     try {
-      const subPath = this.normalizePath(this.config.RESTIC_PATH);
-      const fileRelative = subPath
-        ? `${subPath}/${secretName}.json`
-        : `${secretName}.json`;
-      const includePattern = `/${fileRelative}`;
-
-      logger.info(
-        `Fetching secret ${secretName} from restic snapshot (include: ${includePattern})`,
+      parsed = JSON.parse(stdout);
+    } catch (err) {
+      const error = new Error(
+        `Secret file ${includePattern} is not valid JSON: ${err}`,
       );
-
-      await this.runRestic([
-        "restore",
-        "latest",
-        "--target",
-        tempDir,
-        "--include",
-        includePattern,
-      ]);
-
-      const restoredFile = path.join(tempDir, fileRelative);
-      if (!(await fse.pathExists(restoredFile))) {
-        throw new Error(
-          `Secret file not found in latest snapshot: ${includePattern}`,
-        );
-      }
-
-      const content = await fse.readFile(restoredFile, "utf-8");
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(content);
-      } catch (err) {
-        const error = new Error(
-          `Secret file ${includePattern} is not valid JSON: ${err}`,
-        );
-        (error as Error & { cause?: unknown }).cause = err;
-        throw error;
-      }
-
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        throw new Error(
-          `Secret file ${includePattern} must contain a JSON object`,
-        );
-      }
-
-      const raw = parsed as Record<string, unknown>;
-      logger.info(
-        `Secret fetched: ${secretName} (${Object.keys(raw).length} keys)`,
-      );
-
-      return this.buildResult(secretName, raw);
-    } finally {
-      try {
-        await fse.remove(tempDir);
-      } catch (cleanupError) {
-        logger.warn(
-          `Failed to cleanup restic temp dir ${tempDir}: ${cleanupError}`,
-        );
-      }
+      (error as Error & { cause?: unknown }).cause = err;
+      throw error;
     }
+
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error(
+        `Secret file ${includePattern} must contain a JSON object`,
+      );
+    }
+
+    const raw = parsed as Record<string, unknown>;
+    logger.info(
+      `Secret fetched: ${secretName} (${Object.keys(raw).length} keys)`,
+    );
+
+    return this.buildResult(secretName, raw);
   }
 
   isAvailable(): boolean {
@@ -127,7 +184,33 @@ export class ResticSource extends BaseSecretSource {
     if (!value) {
       return "";
     }
-    return value.replace(/^\/+/, "").replace(/\/+$/, "");
+    return value
+      .replace(/^\/+/, "")
+      .replace(/\/+$/, "")
+      .replace(/\/{2,}/g, "/");
+  }
+
+  private validateRelativePath(value: string, label: string): void {
+    if (!value) {
+      throw new Error(`${label} must not be empty`);
+    }
+    if (!RESTIC_NAME_PATTERN.test(value)) {
+      throw new Error(
+        `Invalid ${label} "${value}": only letters, digits, ".", "_", "-" and "/" are allowed`,
+      );
+    }
+    if (value.startsWith("/") || value.endsWith("/")) {
+      throw new Error(
+        `Invalid ${label} "${value}": leading and trailing slashes are not allowed`,
+      );
+    }
+    for (const segment of value.split("/")) {
+      if (segment === "" || segment === "." || segment === "..") {
+        throw new Error(
+          `Invalid ${label} "${value}": path segments must not be empty, "." or ".."`,
+        );
+      }
+    }
   }
 
   private parseExtraOptions(value: string | undefined): string[] {
@@ -147,8 +230,50 @@ export class ResticSource extends BaseSecretSource {
     );
   }
 
-  private runRestic(args: string[]): Promise<string> {
+  private getTimeoutMs(): number {
+    const seconds = Number(this.config.RESTIC_TIMEOUT_SECONDS);
+    if (!Number.isFinite(seconds) || seconds <= 0) {
+      return DEFAULT_TIMEOUT_SECONDS * 1000;
+    }
+    return seconds * 1000;
+  }
+
+  private getRetries(): number {
+    const retries = Number(this.config.RESTIC_RETRIES);
+    if (!Number.isFinite(retries) || retries < 0) {
+      return DEFAULT_RETRIES;
+    }
+    return Math.floor(retries);
+  }
+
+  private async runRestic(args: string[]): Promise<string> {
+    const retries = this.getRetries();
+    let lastError: unknown;
+
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        return await this.runResticOnce(args);
+      } catch (error) {
+        lastError = error;
+        const code = (error as { code?: string })?.code;
+        if (code === "ENOENT" || attempt >= retries) {
+          throw error;
+        }
+        const delay =
+          RETRY_BASE_DELAY_MS * 2 ** attempt + Math.floor(Math.random() * 250);
+        logger.warn(
+          `restic ${args[0]} failed (attempt ${attempt + 1}/${retries + 1}), retrying in ${delay}ms: ${error}`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
+
+    throw lastError;
+  }
+
+  private runResticOnce(args: string[]): Promise<string> {
     return new Promise((resolve, reject) => {
+      const timeoutMs = this.getTimeoutMs();
       const env: NodeJS.ProcessEnv = {
         ...process.env,
         RESTIC_REPOSITORY: this.config.RESTIC_REPOSITORY,
@@ -161,6 +286,31 @@ export class ResticSource extends BaseSecretSource {
       const child = spawn("restic", fullArgs, { env });
       let stdout = "";
       let stderr = "";
+      let settled = false;
+
+      const finish = (settle: () => void) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        settle();
+      };
+
+      const timer = setTimeout(() => {
+        finish(() => {
+          try {
+            child.kill("SIGKILL");
+          } catch (killError) {
+            logger.warn(
+              `Failed to kill timed out restic process: ${killError}`,
+            );
+          }
+          reject(
+            new Error(`restic ${args[0]} timed out after ${timeoutMs}ms`),
+          );
+        });
+      }, timeoutMs);
 
       child.stdout?.on("data", (chunk) => {
         stdout += chunk.toString();
@@ -168,17 +318,19 @@ export class ResticSource extends BaseSecretSource {
       child.stderr?.on("data", (chunk) => {
         stderr += chunk.toString();
       });
-      child.on("error", (err) => reject(err));
+      child.on("error", (err) => finish(() => reject(err)));
       child.on("close", (code) => {
-        if (code === 0) {
-          resolve(stdout);
-        } else {
-          reject(
-            new Error(
-              `restic ${args[0]} exited with code ${code}: ${stderr.trim() || stdout.trim()}`,
-            ),
-          );
-        }
+        finish(() => {
+          if (code === 0) {
+            resolve(stdout);
+          } else {
+            reject(
+              new Error(
+                `restic ${args[0]} exited with code ${code}: ${stderr.trim() || stdout.trim()}`,
+              ),
+            );
+          }
+        });
       });
     });
   }

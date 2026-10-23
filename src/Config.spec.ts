@@ -1,4 +1,4 @@
-import { Config } from "./Config";
+import { Config, parseBoundedInt } from "./Config";
 
 // Mock fs-extra module
 const mockReadJsonSync = jest.fn();
@@ -64,6 +64,34 @@ describe("Config", () => {
       expect(config.DELETE_ORPHANED_SECRETS).toBe(false);
       expect(config.ORPHAN_CLEANUP_DRY_RUN).toBe(false);
       expect(config.ORPHAN_CLEANUP_MAX_DELETIONS).toBe(50);
+      expect(config.RESTIC_TIMEOUT_SECONDS).toBe(120);
+      expect(config.RESTIC_RETRIES).toBe(2);
+      expect(config.SYNC_FETCH_CONCURRENCY).toBe(4);
+      expect(config.SYNC_WRITE_CONCURRENCY).toBe(4);
+    });
+  });
+
+  describe("parseBoundedInt", () => {
+    it("returns the fallback for missing or non-numeric values", () => {
+      expect(parseBoundedInt(undefined, 7, 1, 10)).toBe(7);
+      expect(parseBoundedInt(null, 7, 1, 10)).toBe(7);
+      expect(parseBoundedInt("", 7, 1, 10)).toBe(7);
+      expect(parseBoundedInt("garbage", 7, 1, 10)).toBe(7);
+      expect(parseBoundedInt("4.5", 7, 1, 10)).toBe(7);
+    });
+
+    it("returns the fallback when the value is below the minimum", () => {
+      expect(parseBoundedInt("0", 4, 1, 32)).toBe(4);
+      expect(parseBoundedInt(-3, 4, 1, 32)).toBe(4);
+    });
+
+    it("clamps values above the maximum", () => {
+      expect(parseBoundedInt("999", 4, 1, 32)).toBe(32);
+    });
+
+    it("accepts values inside the range", () => {
+      expect(parseBoundedInt("6", 4, 1, 32)).toBe(6);
+      expect(parseBoundedInt(8, 4, 1, 32)).toBe(8);
     });
   });
 
@@ -155,6 +183,58 @@ describe("Config", () => {
       await config.reload();
       expect(config.ORPHAN_CLEANUP_DRY_RUN).toBe(true);
       expect(config.ORPHAN_CLEANUP_MAX_DELETIONS).toBe(10);
+    });
+
+    it("should load restic and sync concurrency settings from config.json", async () => {
+      mockReadJson.mockResolvedValue({
+        RESTIC_TIMEOUT_SECONDS: 30,
+        RESTIC_RETRIES: 0,
+        SYNC_FETCH_CONCURRENCY: 8,
+        SYNC_WRITE_CONCURRENCY: 6,
+      });
+
+      const config = new Config();
+      await config.reload();
+
+      expect(config.RESTIC_TIMEOUT_SECONDS).toBe(30);
+      expect(config.RESTIC_RETRIES).toBe(0);
+      expect(config.SYNC_FETCH_CONCURRENCY).toBe(8);
+      expect(config.SYNC_WRITE_CONCURRENCY).toBe(6);
+    });
+
+    it("should let environment variables override restic and concurrency settings", async () => {
+      process.env.RESTIC_TIMEOUT_SECONDS = "45";
+      process.env.RESTIC_RETRIES = "3";
+      process.env.SYNC_FETCH_CONCURRENCY = "2";
+      process.env.SYNC_WRITE_CONCURRENCY = "5";
+      mockReadJson.mockResolvedValue({
+        RESTIC_TIMEOUT_SECONDS: 30,
+        RESTIC_RETRIES: 0,
+        SYNC_FETCH_CONCURRENCY: 8,
+        SYNC_WRITE_CONCURRENCY: 6,
+      });
+
+      const config = new Config();
+      await config.reload();
+
+      expect(config.RESTIC_TIMEOUT_SECONDS).toBe(45);
+      expect(config.RESTIC_RETRIES).toBe(3);
+      expect(config.SYNC_FETCH_CONCURRENCY).toBe(2);
+      expect(config.SYNC_WRITE_CONCURRENCY).toBe(5);
+    });
+
+    it("should fall back to defaults for invalid concurrency values", async () => {
+      process.env.SYNC_FETCH_CONCURRENCY = "0";
+      process.env.SYNC_WRITE_CONCURRENCY = "garbage";
+      process.env.RESTIC_TIMEOUT_SECONDS = "9999";
+      mockReadJson.mockResolvedValue({});
+
+      const config = new Config();
+      await config.reload();
+
+      expect(config.SYNC_FETCH_CONCURRENCY).toBe(4);
+      expect(config.SYNC_WRITE_CONCURRENCY).toBe(4);
+      expect(config.RESTIC_TIMEOUT_SECONDS).toBe(3600);
     });
 
     it("should let environment variables override orphan cleanup settings", async () => {
