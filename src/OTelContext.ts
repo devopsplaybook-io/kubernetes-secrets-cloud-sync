@@ -1,29 +1,19 @@
 import {
   StandardLogger,
-  StandardMeter,
   StandardTracer,
 } from "@devopsplaybook.io/otel-utils";
 import { SpanKind, SpanStatusCode } from "@opentelemetry/api";
 import { Span } from "@opentelemetry/sdk-trace-base";
 
 let tracer: StandardTracer | undefined;
-let meter: StandardMeter | undefined;
 let logger: StandardLogger;
 
 export function OTelSetTracer(tracerIn: StandardTracer) {
   tracer = tracerIn;
 }
 
-export function OTelSetMeter(meterIn: StandardMeter) {
-  meter = meterIn;
-}
-
 export function OTelTracer(): StandardTracer | undefined {
   return tracer;
-}
-
-export function OTelMeter(): StandardMeter | undefined {
-  return meter;
 }
 
 export function OTelLogger(): StandardLogger {
@@ -75,8 +65,4 @@ export function OTelEndSpan(span: Span | undefined, error?: unknown): void {
     span.setStatus({ code: SpanStatusCode.ERROR, message: normalized.message });
   }
   span.end();
-}
-
-export function OTelRequestSpan(req: any): Span {
-  return req.tracerSpanApi;
 }

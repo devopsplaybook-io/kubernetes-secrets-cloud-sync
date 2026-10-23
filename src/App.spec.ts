@@ -58,7 +58,6 @@ jest.mock("./OTelContext", () => {
   return {
     OTelLogger: jest.fn(() => standardLogger),
     OTelSetTracer: jest.fn(),
-    OTelSetMeter: jest.fn(),
     OTelTracer: jest.fn(),
     toError: (value: unknown) =>
       value instanceof Error ? value : new Error(String(value)),
@@ -111,13 +110,17 @@ jest.mock("./SecretSync", () => {
   };
 });
 
-jest.mock("./sources/AlibabaKmsSource", () => ({
-  AlibabaKmsSource: jest.fn(() => ({
+jest.mock("./sources/AlibabaKmsSource", () => {
+  const instance = {
     providerName: "alibaba-kms",
     init: jest.fn(async () => undefined),
     isAvailable: jest.fn(() => false),
-  })),
-}));
+  };
+  return {
+    AlibabaKmsSource: jest.fn(() => instance),
+    __alibabaSource: instance,
+  };
+});
 
 jest.mock("./sources/AwsSecretsManagerSource", () => ({
   AwsSecretsManagerSource: jest.fn(() => ({
@@ -141,6 +144,9 @@ const { __configInstance: configInstance } = jest.requireMock("./Config") as {
 const { __secretSyncInstance: secretSyncInstance } = jest.requireMock(
   "./SecretSync",
 ) as { __secretSyncInstance: { runSync: jest.Mock } };
+const { __alibabaSource: alibabaSource } = jest.requireMock(
+  "./sources/AlibabaKmsSource",
+) as { __alibabaSource: { init: jest.Mock } };
 const { __schedule: mockSchedule, __validate: mockValidate } = jest.requireMock(
   "node-cron",
 ) as { __schedule: jest.Mock; __validate: jest.Mock };
@@ -350,6 +356,19 @@ describe("App main", () => {
     expect(secretSyncInstance.runSync).not.toHaveBeenCalled();
     expect(mockCreateApiServer).not.toHaveBeenCalled();
     expect(apiServer.listen).not.toHaveBeenCalled();
+  });
+
+  it("logs a failed source init and still starts the cron and initial sync", async () => {
+    alibabaSource.init.mockRejectedValueOnce(new Error("bad credentials"));
+
+    await main();
+
+    expect(appLogger.error).toHaveBeenCalledWith(
+      "Failed to initialize secret source alibaba-kms",
+      expect.any(Error),
+    );
+    expect(mockSchedule).toHaveBeenCalledTimes(1);
+    expect(secretSyncInstance.runSync).toHaveBeenCalledTimes(1);
   });
 
   it("does not start a second sync when a cron tick fires during a run", async () => {

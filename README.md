@@ -361,7 +361,7 @@ a hot reload, or a failed configuration reload). It also reports the last sync:
 {
   "status": "ok",
   "service": "kubernetes-secrets-cloud-sync",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "mode": "deployment",
   "running": true,
   "uptimeSeconds": 12,
@@ -627,6 +627,60 @@ spec:
               memory: 50Mi
               cpu: 50m
 ```
+
+### Container image and security hardening
+
+The `Dockerfile` builds in three stages: a builder compiles TypeScript, a
+dedicated stage installs production dependencies only (`npm ci --omit=dev`),
+and the runtime image copies those `node_modules` plus `dist`. The image
+contains no devDependencies (no Jest/TypeScript/SWC) and runs as the unprivileged
+`node` user (uid/gid 1000), with `/opt/app` owned by it. The `restic` CLI is
+installed in the runtime image.
+
+The image defines a Docker `HEALTHCHECK` that calls `GET /api/status` on
+`127.0.0.1:${API_PORT:-8080}`, so an unreachable or `503 degraded` API reports
+the container as unhealthy. It is skipped when `JOB_MODE` is `true`/`1` (job
+mode does not listen and exits). Kubernetes ignores image healthchecks; the
+probes documented above remain the Kubernetes health gate. If the API port is
+changed via `config.json` instead of the `API_PORT` environment variable, the
+healthcheck keeps probing the default port: set `API_PORT` as an environment
+variable or override the healthcheck.
+
+Recommended pod and container `securityContext` (documentation only — adapt it
+to your own manifests):
+
+```yaml
+spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+  containers:
+    - name: kubernetes-secrets-cloud-sync
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+      env:
+        # restic needs a writable cache when the root filesystem is read-only.
+        - name: RESTIC_CACHE_DIR
+          value: /tmp/restic-cache
+  volumes:
+    - name: tmp
+      emptyDir: {}
+```
+
+With `readOnlyRootFilesystem: true` the `/tmp` `emptyDir` is required: restic
+writes its cache there, and the controller itself does not write to disk. The
+mounted `config.json` must be readable by uid/gid 1000 (mode `644` is fine).
 
 ## Development
 

@@ -14,7 +14,7 @@ import { AwsSecretsManagerSource } from "./sources/AwsSecretsManagerSource";
 import { ResticSource } from "./sources/ResticSource";
 import { SecretSync } from "./SecretSync";
 import { SingleFlightRunner } from "./SyncRunner";
-import { OTelLogger, OTelSetMeter, OTelSetTracer, toError } from "./OTelContext";
+import { OTelLogger, OTelSetTracer, toError } from "./OTelContext";
 import { SyncRunResult } from "./types";
 
 const logger = OTelLogger().createModuleLogger("app");
@@ -96,14 +96,14 @@ function isJobMode(config: Config): boolean {
   return value === true || value === "true" || value === "1";
 }
 
-function initTelemetry(config: Config): void {
+function initTelemetry(config: Config): TelemetryBundle {
   const standardLogger = OTelLogger();
   const tracer = new StandardTracer(config);
   const meter = new StandardMeter(config);
   standardLogger.initOTel(config);
   OTelSetTracer(tracer);
-  OTelSetMeter(meter);
   telemetry = { logger: standardLogger, tracer, meter };
+  return telemetry;
 }
 
 /** Flush buffered logs, spans and metrics exactly once before exiting. */
@@ -194,7 +194,7 @@ export async function main(): Promise<void> {
 
   const config = new Config();
   await config.reload();
-  initTelemetry(config);
+  const telemetryBundle = initTelemetry(config);
 
   const jobMode = isJobMode(config);
 
@@ -358,8 +358,8 @@ export async function main(): Promise<void> {
     config,
     runner,
     status,
-    tracer: telemetry.tracer,
-    logger: telemetry.logger,
+    tracer: telemetryBundle.tracer,
+    logger: telemetryBundle.logger,
   });
   await apiServer.listen({ port: config.API_PORT, host: config.API_HOST });
   logger.info(`HTTP API listening on ${config.API_HOST}:${config.API_PORT}`);

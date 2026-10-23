@@ -23,12 +23,12 @@ kubernetes-secrets-cloud-sync/
       AwsSecretsManagerSource.ts# AWS Secrets Manager implementation
       ResticSource.ts           # Restic snapshot-based secret source
   config.json                   # Default runtime configuration
-  Dockerfile                    # Multi-stage build (node:26-alpine + restic CLI)
+  Dockerfile                    # Three-stage build (node:26-alpine + restic CLI, non-root)
 ```
 
 ## Coding Conventions
 
-- **Language**: TypeScript (strict mode off, ES2020 target, CommonJS modules)
+- **Language**: TypeScript (strict mode enabled, ES2020 target, CommonJS modules)
 - **Runtime**: Node.js 26
 - **Build**: `tsc` compiles `src/` to `dist/` (build also type-checks spec files via `tsconfig.spec.json`)
 - **Dev mode**: `tsx watch ./src/App.ts`
@@ -180,18 +180,25 @@ Boolean config values accept `true`, `"true"`, or `"1"` (string or boolean).
 
 ## Docker
 
-- Multi-stage build: `node:26-alpine` builder compiles TypeScript, runtime stage includes `restic` CLI
+- Three-stage build on `node:26-alpine`: builder compiles TypeScript, a
+  `prod-deps` stage runs `npm ci --omit=dev`, and the runtime image copies only
+  `dist` + production `node_modules` (no devDependencies)
+- Runtime image installs the `restic` CLI and runs as `USER node` (uid/gid 1000)
+- Docker `HEALTHCHECK` calls `GET /api/status` on `${API_PORT:-8080}`; skipped
+  in job mode (`JOB_MODE`), which exits without listening. Kubernetes ignores
+  image healthchecks and uses its own probes
 - Runtime command: `node dist/App.js`
-- Restic binary is installed in the runtime image for the Restic secret source
 
 ## Post-Change Validation
 
 After any code change, run:
 
 ```bash
-npm run build    # TypeScript compilation
-npm run lint     # oxlint check
-npm test         # Jest tests with coverage
+npm run build        # TypeScript compilation (strict mode)
+npm run lint         # oxlint check
+npm test             # Jest tests with coverage (thresholds enforced)
+npm audit --omit=dev # production dependencies must be vulnerability-free
 ```
 
-All three must pass. Add tests for new code paths, especially new secret source implementations and sync logic changes.
+All four must pass. Add tests for new code paths, especially new secret source
+implementations and sync logic changes.

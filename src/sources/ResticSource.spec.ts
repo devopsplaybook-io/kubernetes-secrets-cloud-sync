@@ -214,6 +214,34 @@ describe("ResticSource", () => {
     });
   });
 
+  describe("init", () => {
+    it("runs restic version and resolves on success", async () => {
+      const init = source.init();
+      const child = spawnedChild();
+      expect(spawn).toHaveBeenCalledWith("restic", ["version"], expect.anything());
+      child.emit("close", 0);
+
+      await expect(init).resolves.toBeUndefined();
+    });
+
+    it("fails soft when restic version exits non-zero", async () => {
+      const init = source.init();
+      const child = spawnedChild();
+      child.stderr.emit("data", Buffer.from("restic not usable"));
+      child.emit("close", 1);
+
+      await expect(init).resolves.toBeUndefined();
+    });
+
+    it("does not spawn when the source is not configured", async () => {
+      config.RESTIC_REPOSITORY = "";
+
+      await source.init();
+
+      expect(spawn).not.toHaveBeenCalled();
+    });
+  });
+
   describe("beginCycle", () => {
     it("resolves the newest snapshot and dumps secrets from it", async () => {
       const cycle = source.beginCycle(["name-a", "name-b"]);
@@ -285,6 +313,33 @@ describe("ResticSource", () => {
 
       await expect(source.fetchSecret("name-a")).rejects.toThrow(
         "restic snapshots returned no snapshots",
+      );
+    });
+
+    it("records a cycle error for invalid snapshot JSON", async () => {
+      const cycle = source.beginCycle(["name-a"]);
+      const child = spawnedChild();
+      child.stdout.emit("data", Buffer.from("not json"));
+      child.emit("close", 0);
+      await cycle;
+
+      await expect(source.fetchSecret("name-a")).rejects.toThrow(
+        "restic snapshots returned invalid JSON",
+      );
+      expect(spawn).toHaveBeenCalledTimes(1);
+    });
+
+    it("fails fetches when no snapshot has a usable id", async () => {
+      const cycle = source.beginCycle(["name-a"]);
+      completeSnapshotResolution([
+        null,
+        { time: "2026-01-01T00:00:00Z" },
+        { id: "" },
+      ]);
+      await cycle;
+
+      await expect(source.fetchSecret("name-a")).rejects.toThrow(
+        "restic snapshots returned no usable snapshot id",
       );
     });
   });
