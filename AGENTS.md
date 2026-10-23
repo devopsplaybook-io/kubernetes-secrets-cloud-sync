@@ -74,7 +74,34 @@ Multiple providers per namespace are supported via multiple annotations. Secret 
 `App.main()` installs the cron schedule (node-cron `noOverlap: true`) **before**
 the initial sync, so a stalled initial sync cannot prevent future cycles. A
 `SingleFlightRunner` makes a cron tick share the in-flight run instead of
-starting a second one. In job mode the process runs one cycle and exits.
+starting a second one. In job mode the process runs one cycle and exits; the
+exit code comes from `jobExitCode()` (`App.ts`): `1` when listing namespaces
+failed, when `errors > SYNC_ALLOWED_PARTIAL_FAILURES`, or when secrets were
+requested but none could be fetched. An invalid `SYNC_CRON_SCHEDULE` fails
+startup before any source is initialized.
+
+Overlap protection is per process: run a single replica (CronJobs keep
+`concurrencyPolicy: Forbid`).
+
+`SIGTERM`/`SIGINT` stop the scheduler, drain the in-flight run
+(`SingleFlightRunner.whenIdle`), shut down logger/tracer/meter, then exit.
+Job mode awaits the same shutdown before `process.exit`.
+
+Configuration reload (deployment mode) polls `config.json` every 10s with a 1s
+debounce, serializes reloads, and reschedules cron when
+`SYNC_CRON_SCHEDULE` changes. Settings bound at construction time
+(`JOB_MODE`, prefixes, cloud regions/credentials, `LOG_LEVEL`, all
+`OPENTELEMETRY_*`) only log a value-free restart warning. The watcher is not
+installed in job mode.
+
+### Observability
+
+`OTelStartSpan()`/`OTelEndSpan()` (`src/OTelContext.ts`) create explicit spans
+parented by argument (not by ambient context): one `sync-run` root span per
+cycle, plus `source-begin-cycle`, `source-fetch`, `source-end-cycle` and one
+span per Kubernetes API call. Do **not** add custom metrics. Restic output is
+sanitized by `src/Redaction.ts` before it reaches logs or errors, and
+`RESTIC_REPOSITORY` is masked in the config dump.
 
 ### Secret Naming
 
@@ -132,6 +159,7 @@ Key configuration values:
 - `ORPHAN_CLEANUP_MAX_DELETIONS` - abort cleanup above this many orphans (default: `50`)
 - `SYNC_FETCH_CONCURRENCY` - max concurrent cloud fetches (default: `4`, clamped 1-32)
 - `SYNC_WRITE_CONCURRENCY` - max concurrent Kubernetes writes (default: `4`, clamped 1-32)
+- `SYNC_ALLOWED_PARTIAL_FAILURES` - job-mode error budget before exit 1 (default: `0`, clamped 0-10000)
 - `RESTIC_TIMEOUT_SECONDS` - per-invocation restic timeout, SIGKILL (default: `120`)
 - `RESTIC_RETRIES` - transient restic failure retries (default: `2`)
 - Provider-specific: region, credentials for Alibaba KMS / AWS Secrets Manager / Restic

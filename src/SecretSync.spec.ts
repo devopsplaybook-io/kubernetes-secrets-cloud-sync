@@ -3,6 +3,7 @@ import { SecretSource } from "./sources/SecretSource";
 import { NamespaceSyncRequest } from "./types";
 import { KubernetesClient } from "./KubernetesClient";
 import { Config } from "./Config";
+import { OTelSetTracer } from "./OTelContext";
 
 describe("SecretSync", () => {
   // Mock dependencies
@@ -87,9 +88,12 @@ describe("SecretSync", () => {
 
       expect(mockGetNamespaceSyncRequests).toHaveBeenCalledTimes(1);
       expect(mockSourceA.fetchSecret).toHaveBeenCalledWith("secret-a");
-      expect(mockUpsertSecret).toHaveBeenCalledWith("default", "secret-a", {
-        key: "value1",
-      });
+      expect(mockUpsertSecret).toHaveBeenCalledWith(
+        "default",
+        "secret-a",
+        { key: "value1" },
+        undefined,
+      );
     });
 
     it("should handle multiple namespaces and multiple providers", async () => {
@@ -137,16 +141,23 @@ describe("SecretSync", () => {
       await sync.runSync();
 
       expect(mockUpsertSecret).toHaveBeenCalledTimes(3);
-      expect(mockUpsertSecret).toHaveBeenCalledWith("default", "secret-a", {
-        key: "val-a",
-      });
-      expect(mockUpsertSecret).toHaveBeenCalledWith("default", "secret-b", {
-        key: "val-b",
-      });
+      expect(mockUpsertSecret).toHaveBeenCalledWith(
+        "default",
+        "secret-a",
+        { key: "val-a" },
+        undefined,
+      );
+      expect(mockUpsertSecret).toHaveBeenCalledWith(
+        "default",
+        "secret-b",
+        { key: "val-b" },
+        undefined,
+      );
       expect(mockUpsertSecret).toHaveBeenCalledWith(
         "production",
         "prod-db-pass",
         { password: "p@ss" },
+        undefined,
       );
     });
 
@@ -213,8 +224,13 @@ describe("SecretSync", () => {
         [mockSourceA],
         createMockConfig() as Config,
       );
-      // Should not throw
-      await expect(sync.runSync()).resolves.toBeUndefined();
+      // Should not throw, and must report the failed listing.
+      const result = await sync.runSync();
+      expect(result.namespaceListSucceeded).toBe(false);
+      expect(result.namespaces).toBe(0);
+      expect(result.errors).toBe(1);
+      expect(result.secrets).toBe(0);
+      expect(result.failedNamespaces).toEqual([]);
       expect(mockUpsertSecret).not.toHaveBeenCalled();
     });
 
@@ -235,7 +251,9 @@ describe("SecretSync", () => {
         [mockSourceA],
         createMockConfig() as Config,
       );
-      await expect(sync.runSync()).resolves.toBeUndefined();
+      const result = await sync.runSync();
+      expect(result.succeededSecrets).toBe(0);
+      expect(result.failedNamespaces).toEqual(["default"]);
       // Should not attempt to upsert if fetch failed
       expect(mockUpsertSecret).not.toHaveBeenCalled();
     });
@@ -261,7 +279,10 @@ describe("SecretSync", () => {
         [mockSourceA],
         createMockConfig() as Config,
       );
-      await expect(sync.runSync()).resolves.toBeUndefined();
+      const result = await sync.runSync();
+      expect(result.succeededSecrets).toBe(1);
+      expect(result.failedNamespaces).toEqual(["default"]);
+      expect(result.errors).toBe(1);
     });
 
     it("should delete orphaned secrets when DELETE_ORPHANED_SECRETS is true", async () => {
@@ -299,6 +320,7 @@ describe("SecretSync", () => {
       expect(mockDeleteSecret).toHaveBeenCalledWith(
         "default",
         "cloudsync-orphaned-secret",
+        undefined,
       );
       expect(mockDeleteSecret).toHaveBeenCalledTimes(1);
     });
@@ -390,7 +412,10 @@ describe("SecretSync", () => {
         createMockConfig(true) as Config,
       );
       // Should not throw, just log the error
-      await expect(sync.runSync()).resolves.toBeUndefined();
+      const result = await sync.runSync();
+      expect(result.namespaceListSucceeded).toBe(true);
+      expect(result.errors).toBe(1);
+      expect(result.failedNamespaces).toEqual([]);
     });
 
     it("should skip colliding secret names while syncing the others", async () => {
@@ -424,6 +449,7 @@ describe("SecretSync", () => {
         "default",
         "safe-secret",
         { key: "value" },
+        undefined,
       );
     });
 
@@ -461,12 +487,18 @@ describe("SecretSync", () => {
         mockSourceA.fetchSecret.mock.calls.map((call) => call[0]).sort(),
       ).toEqual(["a-only", "b-only", "shared"]);
       expect(mockUpsertSecret).toHaveBeenCalledTimes(4);
-      expect(mockUpsertSecret).toHaveBeenCalledWith("ns-a", "shared", {
-        key: "shared",
-      });
-      expect(mockUpsertSecret).toHaveBeenCalledWith("ns-b", "shared", {
-        key: "shared",
-      });
+      expect(mockUpsertSecret).toHaveBeenCalledWith(
+        "ns-a",
+        "shared",
+        { key: "shared" },
+        undefined,
+      );
+      expect(mockUpsertSecret).toHaveBeenCalledWith(
+        "ns-b",
+        "shared",
+        { key: "shared" },
+        undefined,
+      );
       expect(mockSourceA.beginCycle).toHaveBeenCalledTimes(1);
       expect(
         (mockSourceA.beginCycle.mock.calls[0][0] as string[]).sort(),
@@ -834,6 +866,248 @@ describe("SecretSync", () => {
       await sync.runSync();
 
       expect(mockDeleteSecret).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("sync run result and spans", () => {
+    it("reports counts and failed namespaces for a partial failure", async () => {
+      mockGetNamespaceSyncRequests.mockResolvedValue([
+        {
+          namespace: "ok",
+          annotations: [{ provider: "alibaba-kms", secretNames: ["good"] }],
+        },
+        {
+          namespace: "bad",
+          annotations: [{ provider: "alibaba-kms", secretNames: ["broken"] }],
+        },
+      ]);
+      mockSourceA.fetchSecret.mockImplementation(async (secretName: string) => {
+        if (secretName === "broken") {
+          throw new Error("fetch failed");
+        }
+        return {
+          provider: "alibaba-kms",
+          secretName,
+          data: { key: "value" },
+        };
+      });
+
+      const sync = new SecretSync(
+        mockK8sClient as unknown as KubernetesClient,
+        [mockSourceA],
+        createMockConfig() as Config,
+      );
+      const result = await sync.runSync();
+
+      expect(result).toMatchObject({
+        namespaces: 2,
+        secrets: 2,
+        succeededSecrets: 1,
+        errors: 1,
+        failedNamespaces: ["bad"],
+        namespaceListSucceeded: true,
+      });
+      expect(result.durationMs).toBeGreaterThanOrEqual(0);
+    });
+
+    it("counts a name collision as one error and marks the namespace", async () => {
+      mockGetNamespaceSyncRequests.mockResolvedValue([
+        {
+          namespace: "default",
+          annotations: [
+            {
+              provider: "alibaba-kms",
+              secretNames: ["prod/app/db", "prod-app-db"],
+            },
+          ],
+        },
+      ]);
+
+      const sync = new SecretSync(
+        mockK8sClient as unknown as KubernetesClient,
+        [mockSourceA],
+        createMockConfig() as Config,
+      );
+      const result = await sync.runSync();
+
+      expect(result.secrets).toBe(2);
+      expect(result.succeededSecrets).toBe(0);
+      expect(result.errors).toBe(1);
+      expect(result.failedNamespaces).toEqual(["default"]);
+      expect(mockSourceA.fetchSecret).not.toHaveBeenCalled();
+    });
+
+    it("marks every namespace of a provider whose beginCycle failed", async () => {
+      mockGetNamespaceSyncRequests.mockResolvedValue([
+        {
+          namespace: "ns-a",
+          annotations: [{ provider: "alibaba-kms", secretNames: ["a"] }],
+        },
+        {
+          namespace: "ns-b",
+          annotations: [{ provider: "alibaba-kms", secretNames: ["b"] }],
+        },
+      ]);
+      mockSourceA.beginCycle.mockRejectedValue(new Error("snapshot failed"));
+      mockSourceA.fetchSecret.mockRejectedValue(new Error("snapshot failed"));
+
+      const sync = new SecretSync(
+        mockK8sClient as unknown as KubernetesClient,
+        [mockSourceA],
+        createMockConfig() as Config,
+      );
+      const result = await sync.runSync();
+
+      expect(result.failedNamespaces).toEqual(["ns-a", "ns-b"]);
+      expect(result.succeededSecrets).toBe(0);
+      expect(result.errors).toBeGreaterThanOrEqual(3);
+    });
+
+    it("wraps the cycle in spans with result attributes", async () => {
+      interface FakeSpan {
+        setAttribute: jest.Mock;
+        recordException: jest.Mock;
+        setStatus: jest.Mock;
+        end: jest.Mock;
+      }
+      const spans: Array<{ name: string; span: FakeSpan }> = [];
+      const tracer = {
+        startSpan: jest.fn((name: string) => {
+          const span: FakeSpan = {
+            setAttribute: jest.fn(),
+            recordException: jest.fn(),
+            setStatus: jest.fn(),
+            end: jest.fn(),
+          };
+          spans.push({ name, span });
+          return span;
+        }),
+        shutdown: jest.fn(async () => undefined),
+      };
+      OTelSetTracer(tracer as never);
+
+      try {
+        mockGetNamespaceSyncRequests.mockResolvedValue([
+          {
+            namespace: "default",
+            annotations: [
+              { provider: "alibaba-kms", secretNames: ["secret-a"] },
+            ],
+          },
+        ]);
+        mockSourceA.fetchSecret.mockResolvedValue({
+          provider: "alibaba-kms",
+          secretName: "secret-a",
+          data: { key: "value" },
+        });
+
+        const sync = new SecretSync(
+          mockK8sClient as unknown as KubernetesClient,
+          [mockSourceA],
+          createMockConfig() as Config,
+        );
+        await sync.runSync();
+
+        const names = spans.map((entry) => entry.name);
+        expect(names).toEqual(
+          expect.arrayContaining([
+            "sync-run",
+            "source-begin-cycle",
+            "source-fetch",
+            "source-end-cycle",
+          ]),
+        );
+
+        const root = spans.find((entry) => entry.name === "sync-run")!.span;
+        expect(root.setAttribute).toHaveBeenCalledWith("sync.namespaces", 1);
+        expect(root.setAttribute).toHaveBeenCalledWith("sync.secrets", 1);
+        expect(root.setAttribute).toHaveBeenCalledWith(
+          "sync.succeeded_secrets",
+          1,
+        );
+        expect(root.setAttribute).toHaveBeenCalledWith("sync.errors", 0);
+        expect(root.setAttribute).toHaveBeenCalledWith(
+          "sync.namespace_list_succeeded",
+          true,
+        );
+        expect(root.end).toHaveBeenCalled();
+
+        const fetchSpan = spans.find(
+          (entry) => entry.name === "source-fetch",
+        )!.span;
+        expect(fetchSpan.setAttribute).toHaveBeenCalledWith(
+          "secret.provider",
+          "alibaba-kms",
+        );
+        expect(fetchSpan.setAttribute).toHaveBeenCalledWith(
+          "secret.name",
+          "secret-a",
+        );
+        expect(fetchSpan.setAttribute).toHaveBeenCalledWith(
+          "source.fetch.success",
+          true,
+        );
+        expect(fetchSpan.end).toHaveBeenCalled();
+      } finally {
+        OTelSetTracer(undefined as never);
+      }
+    });
+
+    it("records handled fetch failures on the fetch span", async () => {
+      interface FakeSpan {
+        setAttribute: jest.Mock;
+        recordException: jest.Mock;
+        setStatus: jest.Mock;
+        end: jest.Mock;
+      }
+      const spans: Array<{ name: string; span: FakeSpan }> = [];
+      const tracer = {
+        startSpan: jest.fn((name: string) => {
+          const span: FakeSpan = {
+            setAttribute: jest.fn(),
+            recordException: jest.fn(),
+            setStatus: jest.fn(),
+            end: jest.fn(),
+          };
+          spans.push({ name, span });
+          return span;
+        }),
+        shutdown: jest.fn(async () => undefined),
+      };
+      OTelSetTracer(tracer as never);
+
+      try {
+        mockGetNamespaceSyncRequests.mockResolvedValue([
+          {
+            namespace: "default",
+            annotations: [
+              { provider: "alibaba-kms", secretNames: ["secret-a"] },
+            ],
+          },
+        ]);
+        mockSourceA.fetchSecret.mockRejectedValue(new Error("fetch failed"));
+
+        const sync = new SecretSync(
+          mockK8sClient as unknown as KubernetesClient,
+          [mockSourceA],
+          createMockConfig() as Config,
+        );
+        await sync.runSync();
+
+        const fetchSpan = spans.find(
+          (entry) => entry.name === "source-fetch",
+        )!.span;
+        expect(fetchSpan.setAttribute).toHaveBeenCalledWith(
+          "source.fetch.success",
+          false,
+        );
+        expect(fetchSpan.recordException).toHaveBeenCalledWith(
+          expect.objectContaining({ message: "fetch failed" }),
+        );
+        expect(fetchSpan.end).toHaveBeenCalled();
+      } finally {
+        OTelSetTracer(undefined as never);
+      }
     });
   });
 });

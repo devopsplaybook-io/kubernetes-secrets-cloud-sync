@@ -3,12 +3,12 @@
  * in-flight run instead of starting a second one. A new run can start once
  * the previous one settled, whether it succeeded or failed.
  */
-export class SingleFlightRunner {
-  private inFlight: Promise<void> | null = null;
+export class SingleFlightRunner<T = void> {
+  private inFlight: Promise<T> | null = null;
 
-  constructor(private readonly task: () => Promise<void>) {}
+  constructor(private readonly task: () => Promise<T>) {}
 
-  run(): Promise<void> {
+  run(): Promise<T> {
     if (this.inFlight) {
       return this.inFlight;
     }
@@ -22,5 +22,21 @@ export class SingleFlightRunner {
       });
     this.inFlight = current;
     return current;
+  }
+
+  /**
+   * Resolve once the in-flight run settled (or immediately when idle).
+   * The run's outcome is ignored: this exists to drain work before shutdown.
+   */
+  async whenIdle(): Promise<void> {
+    const current = this.inFlight;
+    if (!current) {
+      return;
+    }
+    try {
+      await current;
+    } catch {
+      // Shutdown must not fail because the drained run failed.
+    }
   }
 }

@@ -242,6 +242,7 @@ Configuration can be set via `config.json` or environment variables:
 | `ORPHAN_CLEANUP_MAX_DELETIONS`         | `50`                                  | Abort cleanup above this many orphans        |
 | `SYNC_FETCH_CONCURRENCY`               | `4`                                   | Max concurrent cloud secret fetches (1-32)   |
 | `SYNC_WRITE_CONCURRENCY`               | `4`                                   | Max concurrent Kubernetes Secret writes      |
+| `SYNC_ALLOWED_PARTIAL_FAILURES`        | `0`                                   | Job-mode error budget (0-10000)              |
 | `ALIBABA_KMS_REGION`                   |                                       | Alibaba Cloud region                         |
 | `ALIBABA_KMS_ACCESS_KEY_ID`            |                                       | Alibaba Cloud access key ID                  |
 | `ALIBABA_KMS_ACCESS_KEY_SECRET`        |                                       | Alibaba Cloud access key secret              |
@@ -256,6 +257,78 @@ Configuration can be set via `config.json` or environment variables:
 | `RESTIC_RETRIES`                       | `2`                                   | Retries for transient restic failures        |
 | `LOG_LEVEL`                            | `info`                                | Log level                                    |
 | `API_PORT`                             | `8080`                                | HTTP API port                                |
+
+### Configuration reload
+
+In deployment (long-lived) mode the service polls `config.json` every
+10 seconds and reloads it once changes settle (1 second debounce). Reloads are
+serialized, so overlapping file events never run concurrently.
+
+Applied on the next cycle without a restart:
+
+- `SYNC_CRON_SCHEDULE` (the cron job is rescheduled in place; an invalid
+  expression is rejected and the previous schedule stays active);
+- `DELETE_ORPHANED_SECRETS`, `ORPHAN_CLEANUP_DRY_RUN`,
+  `ORPHAN_CLEANUP_MAX_DELETIONS`;
+- `SYNC_FETCH_CONCURRENCY`, `SYNC_WRITE_CONCURRENCY`,
+  `SYNC_ALLOWED_PARTIAL_FAILURES`;
+- `RESTIC_REPOSITORY`, `RESTIC_PASSWORD`, `RESTIC_PATH`, `RESTIC_OPTIONS`,
+  `RESTIC_TIMEOUT_SECONDS`, `RESTIC_RETRIES`.
+
+Restart-only settings (`JOB_MODE`, `ANNOTATION_PREFIX`, `SECRET_NAME_PREFIX`,
+cloud regions and credentials, `LOG_LEVEL` and all `OPENTELEMETRY_*` keys) are
+read once at startup. When a reload changes one of them, the service logs a
+warning naming the key and asking for a restart; values are never logged.
+
+The watcher is skipped entirely in job mode, which exits after a single run.
+
+An invalid `SYNC_CRON_SCHEDULE` at startup fails fast: the process logs the
+expression and exits with code 1 instead of silently running without a
+schedule.
+
+### Job mode exit codes
+
+`JOB_MODE=true` runs one sync and exits. The exit code is `1` when any of the
+following is true, and `0` otherwise:
+
+- listing namespaces failed (the run never got a work list);
+- `errors > SYNC_ALLOWED_PARTIAL_FAILURES` (default `0`, i.e. any error fails
+  the job);
+- secrets were requested but none could be fetched (`secrets > 0 &&
+  succeededSecrets === 0`).
+
+A one-line summary (namespaces, secrets, succeeded, errors, failed namespace
+count and duration) is logged before exiting. Raise
+`SYNC_ALLOWED_PARTIAL_FAILURES` only when a small, known number of permanent
+failures should not fail the whole job.
+
+## Observability
+
+When `OPENTELEMETRY_COLLECTOR_HTTP_*` endpoints are configured, the service
+exports traces and logs. Each cycle is wrapped in a `sync-run` span with
+attributes for namespace/secret counts, successes, errors, failed namespaces,
+duration and whether the namespace listing succeeded; child spans cover each
+source `beginCycle`/`fetchSecret`/`endCycle` and every Kubernetes API call.
+No custom metrics are emitted.
+
+On `SIGTERM`/`SIGINT` the service stops scheduling, waits for the in-flight
+sync to finish and shuts the logger, tracer and meter down before exiting, so
+buffered telemetry is flushed. In job mode the same shutdown happens before
+`process.exit`.
+
+Run a **single replica**. Overlap protection (`noOverlap` plus a single-flight
+runner) only applies inside one process; two replicas would write the same
+Secrets concurrently and could race on orphan cleanup. For CronJobs keep
+`concurrencyPolicy: Forbid`.
+
+### Log redaction
+
+Secret values are never logged. Provider credentials and `RESTIC_PASSWORD`
+are masked in the startup configuration dump, and `RESTIC_REPOSITORY` is
+masked there as well. Restic output is sanitized before it reaches logs or
+error messages: URL userinfo (`scheme://user:pass@host`) becomes
+`scheme://***@host`, and the configured repository, password and
+`RESTIC_OPTIONS` strings are replaced with `***`.
 
 ## API Endpoints
 

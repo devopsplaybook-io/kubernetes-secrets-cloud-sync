@@ -1,6 +1,7 @@
 import * as k8s from "@kubernetes/client-node";
+import { Span } from "@opentelemetry/sdk-trace-base";
 import { createHash } from "crypto";
-import { OTelLogger } from "./OTelContext";
+import { OTelEndSpan, OTelLogger, OTelStartSpan } from "./OTelContext";
 import { Config } from "./Config";
 import { AnnotationEntry, NamespaceSyncRequest } from "./types";
 import {
@@ -107,36 +108,42 @@ export class KubernetesClient {
    * List all namespaces and extract sync annotations.
    * Returns only namespaces that have at least one matching annotation.
    */
-  async getNamespaceSyncRequests(): Promise<NamespaceSyncRequest[]> {
-    const nsList = await this.k8sApi.listNamespace();
-    const requests: NamespaceSyncRequest[] = [];
+  async getNamespaceSyncRequests(
+    parentSpan?: Span,
+  ): Promise<NamespaceSyncRequest[]> {
+    const span = OTelStartSpan("k8s-list-namespaces", undefined, parentSpan);
+    try {
+      const nsList = await this.k8sApi.listNamespace();
+      const requests: NamespaceSyncRequest[] = [];
 
-    for (const ns of nsList.items) {
-      const namespaceName = ns.metadata?.name;
-      if (!namespaceName) {
-        continue;
+      for (const ns of nsList.items) {
+        const namespaceName = ns.metadata?.name;
+        if (!namespaceName) {
+          continue;
+        }
+
+        const annotations = ns.metadata?.annotations;
+        if (!annotations) {
+          continue;
+        }
+
+        const annotationEntries = this.parseAnnotations(annotations);
+        if (annotationEntries.length === 0) {
+          continue;
+        }
+
+        requests.push({
+          namespace: namespaceName,
+          annotations: annotationEntries,
+        });
       }
 
-      const annotations = ns.metadata?.annotations;
-      if (!annotations) {
-        continue;
-      }
-
-      const annotationEntries = this.parseAnnotations(annotations);
-      if (annotationEntries.length === 0) {
-        continue;
-      }
-
-      logger.info(
-        `Namespace ${namespaceName}: found ${annotationEntries.length} sync annotation(s)`,
-      );
-      requests.push({
-        namespace: namespaceName,
-        annotations: annotationEntries,
-      });
+      OTelEndSpan(span);
+      return requests;
+    } catch (error) {
+      OTelEndSpan(span, error);
+      throw error;
     }
-
-    return requests;
   }
 
   /**
@@ -183,6 +190,7 @@ export class KubernetesClient {
     namespace: string,
     secretName: string,
     data: Record<string, string>,
+    parentSpan?: Span,
   ): Promise<UpsertResult> {
     const k8sSecretName = normalizeSecretName(
       secretName,
@@ -197,18 +205,20 @@ export class KubernetesClient {
       encodedData[key] = Buffer.from(value).toString("base64");
     }
 
-    const existing = await this.getSecret(namespace, k8sSecretName);
+    const existing = await this.getSecret(namespace, k8sSecretName, parentSpan);
     if (!existing) {
       try {
-        await this.k8sApi.createNamespacedSecret({
+        await this.createSecret(
           namespace,
-          body: this.buildSecretBody(
+          this.buildSecretBody(
             k8sSecretName,
             secretName,
             encodedData,
             hash,
           ),
-        });
+          k8sSecretName,
+          parentSpan,
+        );
         logger.info(
           `Created secret: ${namespace}/${k8sSecretName} (source "${secretName}", ${keyCount} keys)`,
         );
@@ -218,7 +228,11 @@ export class KubernetesClient {
           throw error;
         }
         // A concurrent create won the race: fall through to the update path.
-        const raced = await this.getSecret(namespace, k8sSecretName);
+        const raced = await this.getSecret(
+          namespace,
+          k8sSecretName,
+          parentSpan,
+        );
         if (!raced) {
           throw error;
         }
@@ -230,6 +244,7 @@ export class KubernetesClient {
           encodedData,
           hash,
           keyCount,
+          parentSpan,
         );
       }
     }
@@ -242,6 +257,7 @@ export class KubernetesClient {
       encodedData,
       hash,
       keyCount,
+      parentSpan,
     );
   }
 
@@ -249,41 +265,60 @@ export class KubernetesClient {
    * List every secret across the cluster that was created/managed by this
    * controller instance (identified by the managed-by and instance labels).
    */
-  async listManagedSecrets(): Promise<ManagedSecret[]> {
-    const labelSelector = `${MANAGED_BY_LABEL}=${MANAGED_BY_VALUE},${INSTANCE_LABEL}=${this.instanceId}`;
-    const result = await this.k8sApi.listSecretForAllNamespaces({
-      labelSelector,
-    });
+  async listManagedSecrets(parentSpan?: Span): Promise<ManagedSecret[]> {
+    const span = OTelStartSpan("k8s-list-secrets", undefined, parentSpan);
+    try {
+      const labelSelector = `${MANAGED_BY_LABEL}=${MANAGED_BY_VALUE},${INSTANCE_LABEL}=${this.instanceId}`;
+      const result = await this.k8sApi.listSecretForAllNamespaces({
+        labelSelector,
+      });
 
-    const managed: ManagedSecret[] = [];
-    for (const secret of result.items ?? []) {
-      const ns = secret.metadata?.namespace;
-      const name = secret.metadata?.name;
-      if (ns && name) {
-        managed.push({
-          namespace: ns,
-          name,
-          sourceName: secret.metadata?.annotations?.[SOURCE_NAME_ANNOTATION],
-        });
+      const managed: ManagedSecret[] = [];
+      for (const secret of result.items ?? []) {
+        const ns = secret.metadata?.namespace;
+        const name = secret.metadata?.name;
+        if (ns && name) {
+          managed.push({
+            namespace: ns,
+            name,
+            sourceName: secret.metadata?.annotations?.[SOURCE_NAME_ANNOTATION],
+          });
+        }
       }
+      OTelEndSpan(span);
+      return managed;
+    } catch (error) {
+      OTelEndSpan(span, error);
+      throw error;
     }
-    return managed;
   }
 
   /**
    * Delete a Kubernetes secret.
    */
-  async deleteSecret(namespace: string, name: string): Promise<void> {
+  async deleteSecret(
+    namespace: string,
+    name: string,
+    parentSpan?: Span,
+  ): Promise<void> {
+    const span = OTelStartSpan(
+      "k8s-delete-secret",
+      { "k8s.namespace": namespace, "k8s.secret_name": name },
+      parentSpan,
+    );
     try {
       await this.k8sApi.deleteNamespacedSecret({ namespace, name });
+      OTelEndSpan(span);
       logger.info(`Deleted orphaned secret: ${namespace}/${name}`);
     } catch (error: unknown) {
       if (this.getErrorStatusCode(error) === 404) {
+        OTelEndSpan(span);
         logger.info(
           `Secret already gone, skipping delete: ${namespace}/${name}`,
         );
         return;
       }
+      OTelEndSpan(span, error);
       throw error;
     }
   }
@@ -326,6 +361,7 @@ export class KubernetesClient {
     encodedData: Record<string, string>,
     hash: string,
     keyCount: number,
+    parentSpan?: Span,
   ): Promise<UpsertResult> {
     this.assertOwnership(namespace, k8sSecretName, sourceName, existing);
 
@@ -338,20 +374,23 @@ export class KubernetesClient {
         encodedData,
         hash,
         keyCount,
+        parentSpan,
       );
     } catch (error: unknown) {
       const statusCode = this.getErrorStatusCode(error);
       if (statusCode === 404) {
         // Deleted between GET and PATCH: recreate it.
-        await this.k8sApi.createNamespacedSecret({
+        await this.createSecret(
           namespace,
-          body: this.buildSecretBody(
+          this.buildSecretBody(
             k8sSecretName,
             sourceName,
             encodedData,
             hash,
           ),
-        });
+          k8sSecretName,
+          parentSpan,
+        );
         logger.info(
           `Created secret: ${namespace}/${k8sSecretName} (source "${sourceName}", ${keyCount} keys)`,
         );
@@ -362,17 +401,19 @@ export class KubernetesClient {
       }
 
       // Conflict (concurrent update): retry once with fresh metadata.
-      const fresh = await this.getSecret(namespace, k8sSecretName);
+      const fresh = await this.getSecret(namespace, k8sSecretName, parentSpan);
       if (!fresh) {
-        await this.k8sApi.createNamespacedSecret({
+        await this.createSecret(
           namespace,
-          body: this.buildSecretBody(
+          this.buildSecretBody(
             k8sSecretName,
             sourceName,
             encodedData,
             hash,
           ),
-        });
+          k8sSecretName,
+          parentSpan,
+        );
         logger.info(
           `Created secret: ${namespace}/${k8sSecretName} (source "${sourceName}", ${keyCount} keys)`,
         );
@@ -387,6 +428,7 @@ export class KubernetesClient {
         encodedData,
         hash,
         keyCount,
+        parentSpan,
       );
     }
   }
@@ -399,12 +441,18 @@ export class KubernetesClient {
     encodedData: Record<string, string>,
     hash: string,
     keyCount: number,
+    parentSpan?: Span,
   ): Promise<UpsertResult> {
     const ops = this.buildUpdateOps(existing, sourceName, encodedData, hash);
     if (ops.length === 0) {
       return "unchanged";
     }
-    await this.patchSecret(namespace, k8sSecretName, ops);
+    await this.patchSecret(
+      namespace,
+      k8sSecretName,
+      ops,
+      parentSpan,
+    );
     logger.info(
       `Updated secret: ${namespace}/${k8sSecretName} (source "${sourceName}", ${keyCount} keys)`,
     );
@@ -449,17 +497,49 @@ export class KubernetesClient {
     return ops;
   }
 
+  private async createSecret(
+    namespace: string,
+    body: k8s.V1Secret,
+    k8sSecretName: string,
+    parentSpan?: Span,
+  ): Promise<void> {
+    const span = OTelStartSpan(
+      "k8s-create-secret",
+      { "k8s.namespace": namespace, "k8s.secret_name": k8sSecretName },
+      parentSpan,
+    );
+    try {
+      await this.k8sApi.createNamespacedSecret({ namespace, body });
+      OTelEndSpan(span);
+    } catch (error) {
+      OTelEndSpan(span, error);
+      throw error;
+    }
+  }
+
   private async patchSecret(
     namespace: string,
     k8sSecretName: string,
     body: PatchOperation[],
+    parentSpan?: Span,
   ): Promise<void> {
-    await this.k8sApi.patchNamespacedSecret({
-      name: k8sSecretName,
-      namespace,
-      body,
-      fieldManager: MANAGED_BY_VALUE,
-    });
+    const span = OTelStartSpan(
+      "k8s-patch-secret",
+      { "k8s.namespace": namespace, "k8s.secret_name": k8sSecretName },
+      parentSpan,
+    );
+    try {
+      await this.k8sApi.patchNamespacedSecret({
+        name: k8sSecretName,
+        namespace,
+        body,
+        fieldManager: MANAGED_BY_VALUE,
+      });
+      OTelEndSpan(span);
+    } catch (error) {
+      OTelEndSpan(span, error);
+      throw error;
+    }
   }
 
   private assertOwnership(
@@ -488,13 +568,23 @@ export class KubernetesClient {
   private async getSecret(
     namespace: string,
     name: string,
+    parentSpan?: Span,
   ): Promise<k8s.V1Secret | null> {
+    const span = OTelStartSpan(
+      "k8s-get-secret",
+      { "k8s.namespace": namespace, "k8s.secret_name": name },
+      parentSpan,
+    );
     try {
-      return await this.k8sApi.getNamespacedSecret({ name, namespace });
+      const secret = await this.k8sApi.getNamespacedSecret({ name, namespace });
+      OTelEndSpan(span);
+      return secret;
     } catch (error: unknown) {
       if (this.getErrorStatusCode(error) === 404) {
+        OTelEndSpan(span);
         return null;
       }
+      OTelEndSpan(span, error);
       throw error;
     }
   }

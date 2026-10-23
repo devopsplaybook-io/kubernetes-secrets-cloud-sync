@@ -64,4 +64,52 @@ describe("SingleFlightRunner", () => {
     await expect(second).rejects.toThrow("boom");
     expect(task).toHaveBeenCalledTimes(1);
   });
+
+  it("returns the task result to every caller", async () => {
+    const runner = new SingleFlightRunner(async () => 42);
+
+    await expect(runner.run()).resolves.toBe(42);
+  });
+
+  it("whenIdle resolves immediately when no run is in flight", async () => {
+    const runner = new SingleFlightRunner(async () => undefined);
+
+    await expect(runner.whenIdle()).resolves.toBeUndefined();
+  });
+
+  it("whenIdle waits for the in-flight run", async () => {
+    const gate = deferred();
+    const runner = new SingleFlightRunner(async () => {
+      await gate.promise;
+    });
+
+    let idle = false;
+    const running = runner.run();
+    const idlePromise = runner.whenIdle().then(() => {
+      idle = true;
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(idle).toBe(false);
+
+    gate.resolve();
+    await idlePromise;
+    await running;
+    expect(idle).toBe(true);
+  });
+
+  it("whenIdle swallows a rejected in-flight run", async () => {
+    const gate = deferred();
+    const runner = new SingleFlightRunner(async () => {
+      await gate.promise;
+      throw new Error("boom");
+    });
+
+    const running = runner.run();
+    const idlePromise = runner.whenIdle();
+    gate.resolve();
+
+    await expect(idlePromise).resolves.toBeUndefined();
+    await expect(running).rejects.toThrow("boom");
+  });
 });

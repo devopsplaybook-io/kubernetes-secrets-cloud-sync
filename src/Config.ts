@@ -53,6 +53,7 @@ export class Config implements ConfigOTelInterface {
   public ORPHAN_CLEANUP_MAX_DELETIONS: number | string = 50;
   public SYNC_FETCH_CONCURRENCY = 4;
   public SYNC_WRITE_CONCURRENCY = 4;
+  public SYNC_ALLOWED_PARTIAL_FAILURES = 0;
 
   // Alibaba KMS configuration
   public ALIBABA_KMS_REGION = "";
@@ -151,6 +152,7 @@ export class Config implements ConfigOTelInterface {
     setIfSet("ORPHAN_CLEANUP_MAX_DELETIONS");
     setBoundedIntIfSet("SYNC_FETCH_CONCURRENCY", 4, 1, 32);
     setBoundedIntIfSet("SYNC_WRITE_CONCURRENCY", 4, 1, 32);
+    setBoundedIntIfSet("SYNC_ALLOWED_PARTIAL_FAILURES", 0, 0, 10000);
 
     // Alibaba KMS configuration
     setIfSet("ALIBABA_KMS_REGION");
@@ -163,7 +165,7 @@ export class Config implements ConfigOTelInterface {
     setIfSet("AWS_SECRETSMANAGER_SECRET_ACCESS_KEY", false);
 
     // Restic configuration
-    setIfSet("RESTIC_REPOSITORY");
+    setIfSet("RESTIC_REPOSITORY", false);
     setIfSet("RESTIC_PASSWORD", false);
     setIfSet("RESTIC_PATH");
     setIfSet("RESTIC_OPTIONS");
