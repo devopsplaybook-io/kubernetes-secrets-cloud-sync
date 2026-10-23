@@ -21,6 +21,7 @@ describe("SecretSync", () => {
     listManagedSecrets: mockListManagedSecrets,
     deleteSecret: mockDeleteSecret,
     secretNamePrefix: mockSecretNamePrefix,
+    instanceId: "abcd1234",
   };
 
   // Mock secret sources
@@ -43,6 +44,8 @@ describe("SecretSync", () => {
     deleteOrphans: boolean = false,
   ): Partial<Config> => ({
     DELETE_ORPHANED_SECRETS: deleteOrphans,
+    ORPHAN_CLEANUP_DRY_RUN: false,
+    ORPHAN_CLEANUP_MAX_DELETIONS: 50,
   });
 
   beforeEach(() => {
@@ -379,6 +382,143 @@ describe("SecretSync", () => {
       );
       // Should not throw, just log the error
       await expect(sync.runSync()).resolves.toBeUndefined();
+    });
+
+    it("should skip colliding secret names while syncing the others", async () => {
+      mockGetNamespaceSyncRequests.mockResolvedValue([
+        {
+          namespace: "default",
+          annotations: [
+            {
+              provider: "alibaba-kms",
+              secretNames: ["prod/app/db", "prod-app-db", "safe-secret"],
+            },
+          ],
+        },
+      ]);
+
+      mockSourceA.fetchSecret.mockImplementation(async (secretName: string) => ({
+        provider: "alibaba-kms",
+        secretName,
+        data: { key: "value" },
+      }));
+
+      const sync = new SecretSync(
+        mockK8sClient as unknown as KubernetesClient,
+        [mockSourceA],
+        createMockConfig() as Config,
+      );
+      await sync.runSync();
+
+      expect(mockUpsertSecret).toHaveBeenCalledTimes(1);
+      expect(mockUpsertSecret).toHaveBeenCalledWith(
+        "default",
+        "safe-secret",
+        { key: "value" },
+      );
+    });
+
+    it("should list orphan candidates but delete nothing on dry run", async () => {
+      mockGetNamespaceSyncRequests.mockResolvedValue([]);
+      mockListManagedSecrets.mockResolvedValue([
+        { namespace: "default", name: "cloudsync-orphan" },
+      ]);
+
+      const sync = new SecretSync(
+        mockK8sClient as unknown as KubernetesClient,
+        [mockSourceA],
+        {
+          DELETE_ORPHANED_SECRETS: true,
+          ORPHAN_CLEANUP_DRY_RUN: true,
+          ORPHAN_CLEANUP_MAX_DELETIONS: 50,
+        } as unknown as Config,
+      );
+      await sync.runSync();
+
+      expect(mockListManagedSecrets).toHaveBeenCalled();
+      expect(mockDeleteSecret).not.toHaveBeenCalled();
+    });
+
+    it("should delete nothing when orphans exceed the max deletions threshold", async () => {
+      mockGetNamespaceSyncRequests.mockResolvedValue([]);
+      mockListManagedSecrets.mockResolvedValue([
+        { namespace: "default", name: "cloudsync-orphan-1" },
+        { namespace: "default", name: "cloudsync-orphan-2" },
+      ]);
+
+      const sync = new SecretSync(
+        mockK8sClient as unknown as KubernetesClient,
+        [mockSourceA],
+        {
+          DELETE_ORPHANED_SECRETS: true,
+          ORPHAN_CLEANUP_DRY_RUN: false,
+          ORPHAN_CLEANUP_MAX_DELETIONS: 1,
+        } as unknown as Config,
+      );
+      await sync.runSync();
+
+      expect(mockDeleteSecret).not.toHaveBeenCalled();
+    });
+
+    it("should delete orphans when below the max deletions threshold", async () => {
+      mockGetNamespaceSyncRequests.mockResolvedValue([]);
+      mockListManagedSecrets.mockResolvedValue([
+        { namespace: "default", name: "cloudsync-orphan-1" },
+        { namespace: "default", name: "cloudsync-orphan-2" },
+      ]);
+      mockDeleteSecret.mockResolvedValue(undefined);
+
+      const sync = new SecretSync(
+        mockK8sClient as unknown as KubernetesClient,
+        [mockSourceA],
+        {
+          DELETE_ORPHANED_SECRETS: true,
+          ORPHAN_CLEANUP_DRY_RUN: false,
+          ORPHAN_CLEANUP_MAX_DELETIONS: 5,
+        } as unknown as Config,
+      );
+      await sync.runSync();
+
+      expect(mockDeleteSecret).toHaveBeenCalledTimes(2);
+    });
+
+    it("should keep managed secrets matched through their source-name annotation", async () => {
+      mockGetNamespaceSyncRequests.mockResolvedValue([
+        {
+          namespace: "default",
+          annotations: [
+            {
+              provider: "aws-secretsmanager",
+              secretNames: ["prod/my-app/database"],
+            },
+          ],
+        },
+      ]);
+
+      mockSourceB.fetchSecret.mockResolvedValue({
+        provider: "aws-secretsmanager",
+        secretName: "prod/my-app/database",
+        data: { password: "p@ss" },
+      });
+
+      mockListManagedSecrets.mockResolvedValue([
+        {
+          namespace: "default",
+          name: "cloudsync-prod-my-app-database",
+          sourceName: "prod/my-app/database",
+        },
+      ]);
+      mockUpsertSecret.mockResolvedValue(undefined);
+      mockDeleteSecret.mockResolvedValue(undefined);
+
+      const sync = new SecretSync(
+        mockK8sClient as unknown as KubernetesClient,
+        [mockSourceB],
+        createMockConfig(true) as Config,
+      );
+      await sync.runSync();
+
+      expect(mockDeleteSecret).not.toHaveBeenCalled();
     });
   });
 });

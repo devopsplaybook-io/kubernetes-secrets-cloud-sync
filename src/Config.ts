@@ -25,6 +25,8 @@ export class Config implements ConfigOTelInterface {
   public ANNOTATION_PREFIX = "secrets.cloudsync.devopsplaybook.io";
   public SECRET_NAME_PREFIX = "cloudsync-";
   public DELETE_ORPHANED_SECRETS = false;
+  public ORPHAN_CLEANUP_DRY_RUN = false;
+  public ORPHAN_CLEANUP_MAX_DELETIONS: number | string = 50;
 
   // Alibaba KMS configuration
   public ALIBABA_KMS_REGION = "";
@@ -95,6 +97,8 @@ export class Config implements ConfigOTelInterface {
     setIfSet("ANNOTATION_PREFIX");
     setIfSet("SECRET_NAME_PREFIX");
     setIfSet("DELETE_ORPHANED_SECRETS");
+    setIfSet("ORPHAN_CLEANUP_DRY_RUN");
+    setIfSet("ORPHAN_CLEANUP_MAX_DELETIONS");
 
     // Alibaba KMS configuration
     setIfSet("ALIBABA_KMS_REGION");

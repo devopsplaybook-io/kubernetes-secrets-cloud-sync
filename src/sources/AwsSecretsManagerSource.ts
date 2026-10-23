@@ -14,8 +14,9 @@ const logger = OTelLogger().createModuleLogger("aws-secretsmanager-source");
  * AWS Secrets Manager secret source implementation.
  *
  * Fetches secrets from AWS Secrets Manager using the GetSecretValue API.
- * The secret payload is expected to be a JSON object with string key-value
- * pairs. If the payload is not valid JSON, it is stored under the `value` key.
+ * A `SecretString` payload is parsed as a JSON object with key-value pairs;
+ * if it is not valid JSON, it is stored under the `value` key. A binary
+ * `SecretBinary` payload is stored, base64-encoded, under the `binary` key.
  *
  * Annotation key: secrets.cloudsync.devopsplaybook.io/aws-secretsmanager
  * Annotation value: comma-separated list of AWS Secrets Manager secret names
@@ -77,25 +78,23 @@ export class AwsSecretsManagerSource extends BaseSecretSource {
       new GetSecretValueCommand({ SecretId: secretName }),
     );
 
-    let payload: string | undefined = response.SecretString;
-    if (!payload && response.SecretBinary) {
-      payload = Buffer.from(response.SecretBinary).toString("utf-8");
-    }
-
-    if (!payload) {
-      throw new Error(`No secret data returned for secret: ${secretName}`);
-    }
-
     let raw: Record<string, unknown>;
-    try {
-      const parsed = JSON.parse(payload);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        raw = parsed as Record<string, unknown>;
-      } else {
-        raw = { value: payload };
+    if (response.SecretString) {
+      try {
+        const parsed = JSON.parse(response.SecretString);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          raw = parsed as Record<string, unknown>;
+        } else {
+          raw = { value: response.SecretString };
+        }
+      } catch {
+        raw = { value: response.SecretString };
       }
-    } catch {
-      raw = { value: payload };
+    } else if (response.SecretBinary) {
+      // Binary secrets are surfaced as base64 under the `binary` data key.
+      raw = { binary: Buffer.from(response.SecretBinary).toString("base64") };
+    } else {
+      throw new Error(`No secret data returned for secret: ${secretName}`);
     }
 
     logger.info(

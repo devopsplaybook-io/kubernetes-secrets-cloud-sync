@@ -1,10 +1,12 @@
 import { Config } from "./Config";
 import { KubernetesClient } from "./KubernetesClient";
+import { instanceIdForPrefix } from "./SecretName";
 
 // Mock @kubernetes/client-node
 const mockListNamespace = jest.fn();
-const mockReplaceNamespacedSecret = jest.fn();
+const mockGetNamespacedSecret = jest.fn();
 const mockCreateNamespacedSecret = jest.fn();
+const mockPatchNamespacedSecret = jest.fn();
 const mockListSecretForAllNamespaces = jest.fn();
 const mockDeleteNamespacedSecret = jest.fn();
 
@@ -16,10 +18,12 @@ jest.mock("@kubernetes/client-node", () => {
     makeApiClient() {
       return {
         listNamespace: (...args: unknown[]) => mockListNamespace(...args),
-        replaceNamespacedSecret: (...args: unknown[]) =>
-          mockReplaceNamespacedSecret(...args),
+        getNamespacedSecret: (...args: unknown[]) =>
+          mockGetNamespacedSecret(...args),
         createNamespacedSecret: (...args: unknown[]) =>
           mockCreateNamespacedSecret(...args),
+        patchNamespacedSecret: (...args: unknown[]) =>
+          mockPatchNamespacedSecret(...args),
         listSecretForAllNamespaces: (...args: unknown[]) =>
           mockListSecretForAllNamespaces(...args),
         deleteNamespacedSecret: (...args: unknown[]) =>
@@ -29,6 +33,30 @@ jest.mock("@kubernetes/client-node", () => {
   }
   return { KubeConfig: MockKubeConfig, CoreV1Api: {} };
 });
+
+const NOT_FOUND = Object.assign(new Error("Not Found"), { code: 404 });
+const CONFLICT = Object.assign(new Error("Conflict"), { code: 409 });
+const MANAGED_LABELS = {
+  "app.kubernetes.io/managed-by": "kubernetes-secrets-cloud-sync",
+};
+
+function managedSecret(
+  extra: {
+    labels?: Record<string, string>;
+    annotations?: Record<string, string>;
+  } = {},
+) {
+  return {
+    metadata: {
+      name: "cloudsync-my-secret",
+      namespace: "default",
+      labels: { ...MANAGED_LABELS, ...extra.labels },
+      annotations: extra.annotations ?? {},
+    },
+    type: "Opaque",
+    data: {},
+  };
+}
 
 describe("KubernetesClient", () => {
   let config: Config;
@@ -44,18 +72,8 @@ describe("KubernetesClient", () => {
     it("should return empty array when no namespaces have annotations", async () => {
       mockListNamespace.mockResolvedValue({
         items: [
-          {
-            metadata: {
-              name: "default",
-              annotations: {},
-            },
-          },
-          {
-            metadata: {
-              name: "kube-system",
-              annotations: {},
-            },
-          },
+          { metadata: { name: "default", annotations: {} } },
+          { metadata: { name: "kube-system", annotations: {} } },
         ],
       });
 
@@ -126,11 +144,7 @@ describe("KubernetesClient", () => {
 
     it("should skip namespaces without any annotations", async () => {
       mockListNamespace.mockResolvedValue({
-        items: [
-          {
-            metadata: { name: "default" },
-          },
-        ],
+        items: [{ metadata: { name: "default" } }],
       });
 
       const result = await client.getNamespaceSyncRequests();
@@ -139,11 +153,7 @@ describe("KubernetesClient", () => {
 
     it("should skip namespaces without a name", async () => {
       mockListNamespace.mockResolvedValue({
-        items: [
-          {
-            metadata: { annotations: {} },
-          },
-        ],
+        items: [{ metadata: { annotations: {} } }],
       });
 
       const result = await client.getNamespaceSyncRequests();
@@ -193,25 +203,33 @@ describe("KubernetesClient", () => {
   });
 
   describe("upsertSecret", () => {
-    it("should prefix secret name and encode data as base64", async () => {
-      mockReplaceNamespacedSecret.mockResolvedValue({});
+    it("creates a normalized secret with source-name annotation and labels", async () => {
+      mockGetNamespacedSecret.mockRejectedValue(NOT_FOUND);
+      mockCreateNamespacedSecret.mockResolvedValue({});
 
-      await client.upsertSecret("default", "my-secret", {
+      await client.upsertSecret("default", "prod/my-app/database", {
         username: "admin",
         password: "s3cret",
       });
 
-      expect(mockReplaceNamespacedSecret).toHaveBeenCalledWith({
-        name: "cloudsync-my-secret",
+      expect(mockGetNamespacedSecret).toHaveBeenCalledWith({
+        name: "cloudsync-prod-my-app-database",
+        namespace: "default",
+      });
+      expect(mockCreateNamespacedSecret).toHaveBeenCalledWith({
         namespace: "default",
         body: expect.objectContaining({
           apiVersion: "v1",
           kind: "Secret",
           metadata: expect.objectContaining({
-            name: "cloudsync-my-secret",
+            name: "cloudsync-prod-my-app-database",
             labels: {
               "app.kubernetes.io/managed-by": "kubernetes-secrets-cloud-sync",
-              "cloudsync.devopsplaybook.io/secret-name": "my-secret",
+              "cloudsync.devopsplaybook.io/instance": client.instanceId,
+            },
+            annotations: {
+              "cloudsync.devopsplaybook.io/source-name":
+                "prod/my-app/database",
             },
           }),
           type: "Opaque",
@@ -223,45 +241,223 @@ describe("KubernetesClient", () => {
       });
     });
 
-    it("should create secret if replace returns 404", async () => {
-      const notFoundError = Object.assign(new Error("Not Found"), {
-        code: 404,
-      });
-      mockReplaceNamespacedSecret.mockRejectedValue(notFoundError);
+    it("sets the secret-name label when the source name is a valid label value", async () => {
+      mockGetNamespacedSecret.mockRejectedValue(NOT_FOUND);
       mockCreateNamespacedSecret.mockResolvedValue({});
 
-      await client.upsertSecret("default", "new-secret", { key: "value" });
+      await client.upsertSecret("default", "my-secret", { key: "value" });
 
       expect(mockCreateNamespacedSecret).toHaveBeenCalledWith({
         namespace: "default",
         body: expect.objectContaining({
           metadata: expect.objectContaining({
-            name: "cloudsync-new-secret",
+            name: "cloudsync-my-secret",
+            labels: expect.objectContaining({
+              "cloudsync.devopsplaybook.io/secret-name": "my-secret",
+            }),
           }),
         }),
       });
     });
 
-    it("should throw if replace fails with non-404 error", async () => {
-      const serverError = Object.assign(new Error("Server Error"), {
-        code: 500,
+    it("updates a managed secret with a JSON Patch preserving foreign metadata", async () => {
+      mockGetNamespacedSecret.mockResolvedValue({
+        metadata: {
+          name: "cloudsync-my-secret",
+          namespace: "default",
+          labels: { ...MANAGED_LABELS, "foreign-label": "keep-me" },
+          annotations: { "foreign-annotation": "keep-me-too" },
+        },
+        type: "Opaque",
+        data: {},
       });
-      mockReplaceNamespacedSecret.mockRejectedValue(serverError);
+      mockPatchNamespacedSecret.mockResolvedValue({});
+
+      await client.upsertSecret("default", "my-secret", { key: "new-value" });
+
+      expect(mockCreateNamespacedSecret).not.toHaveBeenCalled();
+      expect(mockPatchNamespacedSecret).toHaveBeenCalledWith({
+        name: "cloudsync-my-secret",
+        namespace: "default",
+        fieldManager: "kubernetes-secrets-cloud-sync",
+        body: [
+          {
+            op: "add",
+            path: "/metadata/labels",
+            value: {
+              "app.kubernetes.io/managed-by": "kubernetes-secrets-cloud-sync",
+              "cloudsync.devopsplaybook.io/instance": client.instanceId,
+              "cloudsync.devopsplaybook.io/secret-name": "my-secret",
+              "foreign-label": "keep-me",
+            },
+          },
+          {
+            op: "add",
+            path: "/metadata/annotations",
+            value: {
+              "cloudsync.devopsplaybook.io/source-name": "my-secret",
+              "foreign-annotation": "keep-me-too",
+            },
+          },
+          {
+            op: "add",
+            path: "/data",
+            value: { key: Buffer.from("new-value").toString("base64") },
+          },
+        ],
+      });
+    });
+
+    it("removes a stale secret-name label when the source name is not a valid label value", async () => {
+      mockGetNamespacedSecret.mockResolvedValue({
+        metadata: {
+          name: "cloudsync-prod-my-app-database",
+          namespace: "default",
+          labels: {
+            ...MANAGED_LABELS,
+            "cloudsync.devopsplaybook.io/secret-name": "stale",
+            "foreign-label": "keep-me",
+          },
+          annotations: {},
+        },
+      });
+      mockPatchNamespacedSecret.mockResolvedValue({});
+
+      await client.upsertSecret("default", "prod/my-app/database", {
+        key: "value",
+      });
+
+      const labels = mockPatchNamespacedSecret.mock.calls[0][0].body[0].value;
+      expect(labels).not.toHaveProperty(
+        "cloudsync.devopsplaybook.io/secret-name",
+      );
+      expect(labels["foreign-label"]).toBe("keep-me");
+    });
+
+    it("refuses to overwrite an unmanaged secret", async () => {
+      mockGetNamespacedSecret.mockResolvedValue({
+        metadata: {
+          name: "cloudsync-my-secret",
+          namespace: "default",
+          labels: { "app.kubernetes.io/managed-by": "helm" },
+          annotations: {},
+        },
+      });
 
       await expect(
-        client.upsertSecret("default", "fail-secret", { key: "value" }),
-      ).rejects.toThrow("Server Error");
+        client.upsertSecret("default", "my-secret", { key: "value" }),
+      ).rejects.toThrow(
+        'Refusing to overwrite unmanaged Secret "default/cloudsync-my-secret" for cloud secret "my-secret"',
+      );
+
+      expect(mockPatchNamespacedSecret).not.toHaveBeenCalled();
+      expect(mockCreateNamespacedSecret).not.toHaveBeenCalled();
+    });
+
+    it("adopts a secret carrying the adoption annotation", async () => {
+      mockGetNamespacedSecret.mockResolvedValue({
+        metadata: {
+          name: "cloudsync-my-secret",
+          namespace: "default",
+          labels: { "app.kubernetes.io/managed-by": "helm" },
+          annotations: { "cloudsync.devopsplaybook.io/adopt": "true" },
+        },
+      });
+      mockPatchNamespacedSecret.mockResolvedValue({});
+
+      await client.upsertSecret("default", "my-secret", { key: "value" });
+
+      expect(mockPatchNamespacedSecret).toHaveBeenCalledTimes(1);
+      const labels = mockPatchNamespacedSecret.mock.calls[0][0].body[0].value;
+      expect(labels["app.kubernetes.io/managed-by"]).toBe(
+        "kubernetes-secrets-cloud-sync",
+      );
+    });
+
+    it("re-reads and patches when a concurrent create returns 409", async () => {
+      mockGetNamespacedSecret
+        .mockRejectedValueOnce(NOT_FOUND)
+        .mockResolvedValueOnce(managedSecret());
+      mockCreateNamespacedSecret.mockRejectedValueOnce(CONFLICT);
+      mockPatchNamespacedSecret.mockResolvedValue({});
+
+      await client.upsertSecret("default", "my-secret", { key: "value" });
+
+      expect(mockGetNamespacedSecret).toHaveBeenCalledTimes(2);
+      expect(mockCreateNamespacedSecret).toHaveBeenCalledTimes(1);
+      expect(mockPatchNamespacedSecret).toHaveBeenCalledTimes(1);
+    });
+
+    it("retries a conflicting patch once with fresh metadata", async () => {
+      mockGetNamespacedSecret.mockResolvedValue(managedSecret());
+      mockPatchNamespacedSecret
+        .mockRejectedValueOnce(CONFLICT)
+        .mockResolvedValueOnce({});
+
+      await client.upsertSecret("default", "my-secret", { key: "value" });
+
+      expect(mockPatchNamespacedSecret).toHaveBeenCalledTimes(2);
+    });
+
+    it("throws when the patch keeps conflicting", async () => {
+      mockGetNamespacedSecret.mockResolvedValue(managedSecret());
+      mockPatchNamespacedSecret.mockRejectedValue(CONFLICT);
+
+      await expect(
+        client.upsertSecret("default", "my-secret", { key: "value" }),
+      ).rejects.toThrow("Conflict");
+      expect(mockPatchNamespacedSecret).toHaveBeenCalledTimes(2);
+    });
+
+    it("recreates the secret when the patch returns 404", async () => {
+      mockGetNamespacedSecret.mockResolvedValue(managedSecret());
+      mockPatchNamespacedSecret.mockRejectedValue(NOT_FOUND);
+      mockCreateNamespacedSecret.mockResolvedValue({});
+
+      await client.upsertSecret("default", "my-secret", { key: "value" });
+
+      expect(mockCreateNamespacedSecret).toHaveBeenCalledWith({
+        namespace: "default",
+        body: expect.objectContaining({
+          metadata: expect.objectContaining({ name: "cloudsync-my-secret" }),
+        }),
+      });
+    });
+
+    it("propagates non-404 errors from the initial GET", async () => {
+      mockGetNamespacedSecret.mockRejectedValue(
+        Object.assign(new Error("Forbidden"), { code: 403 }),
+      );
+
+      await expect(
+        client.upsertSecret("default", "my-secret", { key: "value" }),
+      ).rejects.toThrow("Forbidden");
+      expect(mockCreateNamespacedSecret).not.toHaveBeenCalled();
+      expect(mockPatchNamespacedSecret).not.toHaveBeenCalled();
     });
   });
 
   describe("listManagedSecrets", () => {
-    it("should return list of managed secrets from all namespaces", async () => {
+    it("queries with the managed-by and instance label selector", async () => {
+      mockListSecretForAllNamespaces.mockResolvedValue({ items: [] });
+
+      await client.listManagedSecrets();
+
+      expect(mockListSecretForAllNamespaces).toHaveBeenCalledWith({
+        labelSelector: `app.kubernetes.io/managed-by=kubernetes-secrets-cloud-sync,cloudsync.devopsplaybook.io/instance=${instanceIdForPrefix(config.ANNOTATION_PREFIX)}`,
+      });
+    });
+
+    it("returns managed secrets with their source name", async () => {
       mockListSecretForAllNamespaces.mockResolvedValue({
         items: [
           {
             metadata: {
               namespace: "default",
               name: "cloudsync-secret-a",
+              annotations: {
+                "cloudsync.devopsplaybook.io/source-name": "prod/secret-a",
+              },
             },
           },
           {
@@ -275,29 +471,25 @@ describe("KubernetesClient", () => {
 
       const result = await client.listManagedSecrets();
       expect(result).toEqual([
-        { namespace: "default", name: "cloudsync-secret-a" },
-        { namespace: "production", name: "cloudsync-secret-b" },
+        {
+          namespace: "default",
+          name: "cloudsync-secret-a",
+          sourceName: "prod/secret-a",
+        },
+        {
+          namespace: "production",
+          name: "cloudsync-secret-b",
+          sourceName: undefined,
+        },
       ]);
     });
 
-    it("should filter out secrets without namespace or name", async () => {
+    it("filters out secrets without namespace or name", async () => {
       mockListSecretForAllNamespaces.mockResolvedValue({
         items: [
-          {
-            metadata: {
-              namespace: "default",
-              name: "valid-secret",
-            },
-          },
-          {
-            metadata: {},
-          },
-          {
-            metadata: {
-              namespace: "",
-              name: "",
-            },
-          },
+          { metadata: { namespace: "default", name: "valid-secret" } },
+          { metadata: {} },
+          { metadata: { namespace: "", name: "" } },
         ],
       });
 
@@ -306,17 +498,7 @@ describe("KubernetesClient", () => {
       expect(result[0]).toEqual({
         namespace: "default",
         name: "valid-secret",
-      });
-    });
-
-    it("should query with the managed-by label selector", async () => {
-      mockListSecretForAllNamespaces.mockResolvedValue({ items: [] });
-
-      await client.listManagedSecrets();
-
-      expect(mockListSecretForAllNamespaces).toHaveBeenCalledWith({
-        labelSelector:
-          "app.kubernetes.io/managed-by=kubernetes-secrets-cloud-sync",
+        sourceName: undefined,
       });
     });
   });
@@ -334,22 +516,17 @@ describe("KubernetesClient", () => {
     });
 
     it("should handle 404 gracefully when secret is already gone", async () => {
-      const notFoundError = Object.assign(new Error("Not Found"), {
-        code: 404,
-      });
-      mockDeleteNamespacedSecret.mockRejectedValue(notFoundError);
+      mockDeleteNamespacedSecret.mockRejectedValue(NOT_FOUND);
 
-      // Should not throw
       await expect(
         client.deleteSecret("default", "already-deleted"),
       ).resolves.toBeUndefined();
     });
 
     it("should throw if delete fails with non-404 error", async () => {
-      const forbiddenError = Object.assign(new Error("Forbidden"), {
-        code: 403,
-      });
-      mockDeleteNamespacedSecret.mockRejectedValue(forbiddenError);
+      mockDeleteNamespacedSecret.mockRejectedValue(
+        Object.assign(new Error("Forbidden"), { code: 403 }),
+      );
 
       await expect(
         client.deleteSecret("default", "no-permission"),

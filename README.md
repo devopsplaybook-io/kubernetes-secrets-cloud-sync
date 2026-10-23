@@ -2,6 +2,32 @@
 
 A Kubernetes controller that synchronizes secrets from cloud providers into Kubernetes namespaces based on annotations.
 
+## Security and trust model
+
+**This controller is a highly privileged component.** It holds cloud credentials
+with account-wide read access (Alibaba KMS, AWS Secrets Manager, Restic) and a
+ClusterRole that grants access to Secrets in every namespace.
+
+Anyone able to patch a namespace's sync annotations
+(`secrets.cloudsync.devopsplaybook.io/*`) can ask the controller to copy any
+secret readable by those credentials — including by guessing its name — into
+that namespace, where they can read it. Do not grant namespace-annotation write
+access to untrusted workloads.
+
+Recommendations:
+
+- Restrict who may set the annotation prefix: use RBAC on namespaces and/or an
+  admission policy (for example a Kubernetes `ValidatingAdmissionPolicy`) so
+  that only trusted subjects may create or update
+  `secrets.cloudsync.devopsplaybook.io/*` annotations.
+- Scope cloud credentials as narrowly as possible (per-tenant or per-namespace
+  credentials, one controller instance per trust boundary).
+- Review the ClusterRole: orphan cleanup requires list access to Secrets across
+  namespaces; restrict it if that risk outweighs the benefit.
+
+No per-namespace allow-list is built into the controller: isolation relies on
+Kubernetes RBAC and admission policies.
+
 ## How It Works
 
 1. The service runs inside a Kubernetes cluster and periodically scans all namespaces
@@ -37,6 +63,72 @@ This will sync:
 - `shared-certificates` from **Restic**
 
 All fetched secrets become Kubernetes Secret resources in the `my-app` namespace, each prefixed with the configured `SECRET_NAME_PREFIX` (default: `cloudsync-`).
+
+### Secret naming
+
+The cloud identifier does not need to be a valid Kubernetes name: the controller
+normalizes `SECRET_NAME_PREFIX` + identifier into a DNS-1123 subdomain
+(lowercase alphanumerics, `-` and `.`, at most 253 characters):
+
+- lowercase; invalid characters are replaced with `-`; repeated separators are
+  collapsed and leading/trailing separators are trimmed;
+- names longer than 253 characters are truncated and suffixed with
+  `-<8 hex chars>` derived from a SHA-256 hash (deterministic);
+- already-valid names are unchanged, so existing Secrets are not renamed.
+
+| Cloud identifier       | Kubernetes Secret name            |
+| ---------------------- | --------------------------------- |
+| `my-app-database`      | `cloudsync-my-app-database`       |
+| `prod/my-app/database` | `cloudsync-prod-my-app-database`  |
+| `PROD/My-App/DB`       | `cloudsync-prod-my-app-db`        |
+
+The original identifier is always stored in the
+`cloudsync.devopsplaybook.io/source-name` annotation. The
+`cloudsync.devopsplaybook.io/secret-name` label is set only when the identifier
+is also a valid label value (at most 63 characters), so it is omitted for names
+such as `prod/my-app/database`.
+
+If two identifiers in the same namespace normalize to the same Kubernetes
+Secret name, the controller logs an error and skips both; the rest of the
+namespace still syncs.
+
+### Ownership and adoption
+
+Every Secret created by the controller is labeled
+`app.kubernetes.io/managed-by=kubernetes-secrets-cloud-sync` (plus an instance
+label, see [Orphan cleanup](#orphan-cleanup)). Before writing, the controller
+reads the existing Secret: a Secret that is not managed by the controller is
+**never overwritten** and that secret fails to sync with an error in the logs.
+
+To hand an existing Secret over to the controller, add the adoption annotation:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cloudsync-my-secret
+  annotations:
+    cloudsync.devopsplaybook.io/adopt: "true"
+```
+
+On adoption, and on every later update, labels and annotations not owned by the
+controller are preserved, while the `data` section is replaced by the cloud
+payload (stale keys are removed).
+
+### Payload validation and binary secrets
+
+Before writing a Secret, each provider validates the payload:
+
+- data keys must match `[-._a-zA-Z0-9]+`; invalid keys fail the whole Secret
+  with an error naming them (no partial write);
+- string, number and boolean values are stringified; `null`/`undefined` values
+  are skipped; nested objects and arrays are rejected — store JSON as a string
+  instead;
+- payloads above the Kubernetes 1 MiB Secret limit are rejected.
+
+Binary secrets are supported deliberately: an AWS `SecretBinary` payload and an
+Alibaba KMS secret with `secretDataType=binary` are stored base64-encoded under
+the data key `binary` (never UTF-8 decoded and never JSON parsed).
 
 ### Created Secrets
 
@@ -79,6 +171,25 @@ With annotation `secrets.cloudsync.devopsplaybook.io/restic: "feedwatcher"`, a K
 
 The `restic` CLI must be available on the container `PATH` (included in the provided Docker image). Backend-specific environment variables (e.g. `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` for S3-backed repos) should be provided via the pod environment and will be forwarded to the `restic` process.
 
+## Orphan cleanup
+
+When `DELETE_ORPHANED_SECRETS` is enabled, Secrets managed by this controller
+instance that are no longer referenced by any namespace annotation are deleted.
+Cleanup is instance-scoped: created Secrets carry
+`cloudsync.devopsplaybook.io/instance=<id>` (8 hex characters derived from
+`ANNOTATION_PREFIX`), and only Secrets with that label are cleanup candidates.
+A second installation, or a prefix change, therefore never deletes the other
+instance's Secrets. Secrets created before this label existed stop being
+auto-deleted (safe default).
+
+Safety controls:
+
+- `ORPHAN_CLEANUP_DRY_RUN=true` logs the candidates and deletes nothing.
+- `ORPHAN_CLEANUP_MAX_DELETIONS` (default `50`): when more orphans than this
+  are found, nothing is deleted and an error is logged.
+- A preview of the candidates (up to 20, plus a count of the rest) is logged
+  before any deletion.
+
 ## Configuration
 
 Configuration can be set via `config.json` or environment variables:
@@ -90,6 +201,8 @@ Configuration can be set via `config.json` or environment variables:
 | `ANNOTATION_PREFIX`                    | `secrets.cloudsync.devopsplaybook.io` | Annotation key prefix                        |
 | `SECRET_NAME_PREFIX`                   | `cloudsync-`                          | Prefix for created Kubernetes secret names   |
 | `DELETE_ORPHANED_SECRETS`              | `false`                               | Delete managed secrets no longer annotated   |
+| `ORPHAN_CLEANUP_DRY_RUN`               | `false`                               | Preview orphan deletions without deleting    |
+| `ORPHAN_CLEANUP_MAX_DELETIONS`         | `50`                                  | Abort cleanup above this many orphans        |
 | `ALIBABA_KMS_REGION`                   |                                       | Alibaba Cloud region                         |
 | `ALIBABA_KMS_ACCESS_KEY_ID`            |                                       | Alibaba Cloud access key ID                  |
 | `ALIBABA_KMS_ACCESS_KEY_SECRET`        |                                       | Alibaba Cloud access key secret              |
@@ -117,6 +230,10 @@ The service is designed to run inside a Kubernetes cluster as a CronJob (job mod
 ### Required RBAC Permissions
 
 Because the service scans all namespaces for annotations and creates secrets in arbitrary namespaces, it needs a **ClusterRole**. Below are the minimum required permissions:
+
+The controller reads (`get`) a Secret before writing and updates it with a JSON
+`patch`; `update` is no longer used. Keep `get`, `patch`, `create`, `list` and
+`delete` when reviewing the deployed ClusterRole.
 
 | Resource     | Verbs                                                | Reason                                                                |
 | ------------ | ---------------------------------------------------- | --------------------------------------------------------------------- |

@@ -64,13 +64,40 @@ Multiple providers per namespace are supported via multiple annotations. Secret 
 
 1. `KubernetesClient.getNamespaceSyncRequests()` - lists all namespaces, parses sync annotations
 2. For each namespace, `SecretSync` iterates annotations, calls `source.fetchSecret()` for each secret name
-3. `KubernetesClient.upsertSecret()` - replace-then-create pattern (404 fallback to create)
-4. Managed secrets are labeled with `app.kubernetes.io/managed-by=kubernetes-secrets-cloud-sync`
-5. Orphan cleanup (when enabled) deletes managed secrets no longer referenced by any annotation
+3. `SecretSync` normalizes every cloud name to a Kubernetes Secret name and detects collisions per namespace (colliding names are skipped, other secrets continue)
+4. `KubernetesClient.upsertSecret()` - GET the Secret, enforce the managed-by ownership guard (or the `cloudsync.devopsplaybook.io/adopt: "true"` annotation), then create or patch (RFC 6902 JSON Patch, 409 retried once, 404 falls back to create)
+5. Managed secrets are labeled with `app.kubernetes.io/managed-by=kubernetes-secrets-cloud-sync` and `cloudsync.devopsplaybook.io/instance=<id>`; the original cloud identifier is stored in the `cloudsync.devopsplaybook.io/source-name` annotation
+6. Orphan cleanup (when enabled) deletes only Secrets of this instance (`managed-by` + `instance` labels) no longer referenced by any annotation, honoring `ORPHAN_CLEANUP_DRY_RUN` and `ORPHAN_CLEANUP_MAX_DELETIONS`
 
 ### Secret Naming
 
-Kubernetes secret names are prefixed with `SECRET_NAME_PREFIX` (default: `cloudsync-`). A secret named `db-password` in annotations becomes `cloudsync-db-password` in Kubernetes.
+`SECRET_NAME_PREFIX` + cloud identifier is normalized into a valid DNS-1123
+subdomain (lowercase, `-`/`.`, <= 253 chars; long names get a deterministic
+`-<hash8>` suffix). Already-valid names are unchanged. The raw identifier is
+kept in the `cloudsync.devopsplaybook.io/source-name` annotation; the
+`cloudsync.devopsplaybook.io/secret-name` label is only set when the identifier
+is a valid label value (<= 63 chars). `src/SecretName.ts` holds the pure helpers.
+
+### Ownership, Validation and Binary Payloads
+
+- Never overwrite a Secret whose `app.kubernetes.io/managed-by` label is not
+  `kubernetes-secrets-cloud-sync`; adoption requires
+  `cloudsync.devopsplaybook.io/adopt: "true"`. Foreign labels/annotations are
+  preserved on update.
+- `BaseSecretSource.validateSecretData()` rejects invalid keys
+  (`[-._a-zA-Z0-9]+`), nested objects/arrays and payloads above 1 MiB; scalars
+  are stringified, `null`/`undefined` skipped.
+- AWS `SecretBinary` and Alibaba `secretDataType=binary` are stored base64 under
+  the `binary` key; Alibaba KMS calls retry transient errors (3 attempts,
+  exponential jitter).
+
+### Trust Model
+
+The controller holds account-wide cloud credentials and a ClusterRole over all
+Secrets: anyone who can patch a namespace's `secrets.cloudsync.devopsplaybook.io/*`
+annotations can copy any readable cloud secret into that namespace. This is
+documented in the README; there is no built-in per-namespace allow-list —
+restrict annotation edits with RBAC/admission policies and scope credentials.
 
 ## Configuration
 
@@ -87,6 +114,8 @@ Key configuration values:
 - `ANNOTATION_PREFIX` - namespace annotation prefix
 - `SECRET_NAME_PREFIX` - prefix added to Kubernetes secret names
 - `DELETE_ORPHANED_SECRETS` - enable orphan managed secret cleanup
+- `ORPHAN_CLEANUP_DRY_RUN` - preview orphan deletions without deleting (default: `false`)
+- `ORPHAN_CLEANUP_MAX_DELETIONS` - abort cleanup above this many orphans (default: `50`)
 - Provider-specific: region, credentials for Alibaba KMS / AWS Secrets Manager / Restic
 
 Boolean config values accept `true`, `"true"`, or `"1"` (string or boolean).
