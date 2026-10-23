@@ -24,6 +24,11 @@ export class SingleFlightRunner<T = void> {
     return current;
   }
 
+  /** Whether a run is currently in flight. */
+  isRunning(): boolean {
+    return this.inFlight !== null;
+  }
+
   /**
    * Resolve once the in-flight run settled (or immediately when idle).
    * The run's outcome is ignored: this exists to drain work before shutdown.

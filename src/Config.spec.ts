@@ -32,6 +32,8 @@ describe("Config", () => {
     delete process.env.SYNC_ALLOWED_PARTIAL_FAILURES;
     delete process.env.RESTIC_REPOSITORY;
     delete process.env.RESTIC_PASSWORD;
+    delete process.env.API_PORT;
+    delete process.env.API_HOST;
   });
 
   afterEach(() => {
@@ -72,6 +74,8 @@ describe("Config", () => {
       expect(config.SYNC_FETCH_CONCURRENCY).toBe(4);
       expect(config.SYNC_WRITE_CONCURRENCY).toBe(4);
       expect(config.SYNC_ALLOWED_PARTIAL_FAILURES).toBe(0);
+      expect(config.API_PORT).toBe(8080);
+      expect(config.API_HOST).toBe("0.0.0.0");
     });
   });
 
@@ -275,6 +279,45 @@ describe("Config", () => {
       process.env.SYNC_ALLOWED_PARTIAL_FAILURES = "-1";
       await config.reload();
       expect(config.SYNC_ALLOWED_PARTIAL_FAILURES).toBe(0);
+    });
+
+    it("should load API settings from config.json and environment", async () => {
+      mockReadJson.mockResolvedValue({
+        API_PORT: 9090,
+        API_HOST: "127.0.0.1",
+      });
+
+      const config = new Config();
+      await config.reload();
+      expect(config.API_PORT).toBe(9090);
+      expect(config.API_HOST).toBe("127.0.0.1");
+
+      process.env.API_PORT = "3000";
+      process.env.API_HOST = " 10.0.0.1 ";
+      await config.reload();
+      expect(config.API_PORT).toBe(3000);
+      expect(config.API_HOST).toBe("10.0.0.1");
+    });
+
+    it("should fall back for invalid API settings", async () => {
+      mockReadJson.mockResolvedValue({
+        API_PORT: 0,
+        API_HOST: "   ",
+      });
+
+      const config = new Config();
+      await config.reload();
+      expect(config.API_PORT).toBe(8080);
+      expect(config.API_HOST).toBe("0.0.0.0");
+    });
+
+    it("should clamp API_PORT above the maximum port", async () => {
+      process.env.API_PORT = "70000";
+      mockReadJson.mockResolvedValue({});
+
+      const config = new Config();
+      await config.reload();
+      expect(config.API_PORT).toBe(65535);
     });
 
     it("should mask RESTIC_REPOSITORY in the configuration log", async () => {

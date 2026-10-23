@@ -10,6 +10,7 @@ A TypeScript service that syncs secrets from cloud providers (Alibaba Cloud KMS,
 kubernetes-secrets-cloud-sync/
   src/
     App.ts                      # Entry point: startup, cron scheduling, source init
+    Api.ts                      # HTTP API (status/manual sync) + in-memory SyncStatus
     Config.ts                   # Configuration loader (config.json + env vars)
     KubernetesClient.ts         # Kubernetes API: namespace scanning, secret CRUD
     SecretSync.ts               # Sync orchestrator: ties sources + k8s client together
@@ -83,9 +84,15 @@ startup before any source is initialized.
 Overlap protection is per process: run a single replica (CronJobs keep
 `concurrencyPolicy: Forbid`).
 
-`SIGTERM`/`SIGINT` stop the scheduler, drain the in-flight run
-(`SingleFlightRunner.whenIdle`), shut down logger/tracer/meter, then exit.
-Job mode awaits the same shutdown before `process.exit`.
+In deployment mode the HTTP API (`src/Api.ts`) starts on
+`API_HOST`/`API_PORT` before cron scheduling and the initial sync, so probes
+succeed while the first cycle runs. `POST /api/sync` uses the same
+`SingleFlightRunner`, so a manual trigger during a cron/initial run returns
+409 instead of starting a second cycle. Job mode never listens.
+
+`SIGTERM`/`SIGINT` stop the scheduler, close the HTTP server, drain the
+in-flight run (`SingleFlightRunner.whenIdle`), shut down logger/tracer/meter,
+then exit. Job mode awaits the same shutdown before `process.exit`.
 
 Configuration reload (deployment mode) polls `config.json` every 10s with a 1s
 debounce, serializes reloads, and reschedules cron when
@@ -99,7 +106,10 @@ installed in job mode.
 `OTelStartSpan()`/`OTelEndSpan()` (`src/OTelContext.ts`) create explicit spans
 parented by argument (not by ambient context): one `sync-run` root span per
 cycle, plus `source-begin-cycle`, `source-fetch`, `source-end-cycle` and one
-span per Kubernetes API call. Do **not** add custom metrics. Restic output is
+span per Kubernetes API call. HTTP requests under `/api` get server spans from
+`@devopsplaybook.io/otel-utils-fastify` (registered without a meter);
+`GET /api/status` is excluded to keep probe noise out of traces. Do **not**
+add custom metrics. Restic output is
 sanitized by `src/Redaction.ts` before it reaches logs or errors, and
 `RESTIC_REPOSITORY` is masked in the config dump.
 
@@ -160,6 +170,8 @@ Key configuration values:
 - `SYNC_FETCH_CONCURRENCY` - max concurrent cloud fetches (default: `4`, clamped 1-32)
 - `SYNC_WRITE_CONCURRENCY` - max concurrent Kubernetes writes (default: `4`, clamped 1-32)
 - `SYNC_ALLOWED_PARTIAL_FAILURES` - job-mode error budget before exit 1 (default: `0`, clamped 0-10000)
+- `API_PORT` - HTTP API listen port, deployment mode only (default: `8080`, clamped 1-65535, restart-only)
+- `API_HOST` - HTTP API listen address (default: `0.0.0.0`, blank falls back to the default, restart-only)
 - `RESTIC_TIMEOUT_SECONDS` - per-invocation restic timeout, SIGKILL (default: `120`)
 - `RESTIC_RETRIES` - transient restic failure retries (default: `2`)
 - Provider-specific: region, credentials for Alibaba KMS / AWS Secrets Manager / Restic

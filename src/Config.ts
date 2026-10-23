@@ -55,6 +55,10 @@ export class Config implements ConfigOTelInterface {
   public SYNC_WRITE_CONCURRENCY = 4;
   public SYNC_ALLOWED_PARTIAL_FAILURES = 0;
 
+  // HTTP API configuration
+  public API_PORT = 8080;
+  public API_HOST = "0.0.0.0";
+
   // Alibaba KMS configuration
   public ALIBABA_KMS_REGION = "";
   public ALIBABA_KMS_ACCESS_KEY_ID = "";
@@ -153,6 +157,15 @@ export class Config implements ConfigOTelInterface {
     setBoundedIntIfSet("SYNC_FETCH_CONCURRENCY", 4, 1, 32);
     setBoundedIntIfSet("SYNC_WRITE_CONCURRENCY", 4, 1, 32);
     setBoundedIntIfSet("SYNC_ALLOWED_PARTIAL_FAILURES", 0, 0, 10000);
+
+    // HTTP API configuration
+    setBoundedIntIfSet("API_PORT", 8080, 1, 65535);
+    setIfSet("API_HOST");
+    if (typeof this.API_HOST !== "string" || this.API_HOST.trim() === "") {
+      this.API_HOST = "0.0.0.0";
+    } else {
+      this.API_HOST = this.API_HOST.trim();
+    }
 
     // Alibaba KMS configuration
     setIfSet("ALIBABA_KMS_REGION");

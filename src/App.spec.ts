@@ -14,6 +14,27 @@ jest.mock("node-cron", () => {
 
 jest.mock("fs-extra", () => ({ watchFile: jest.fn() }));
 
+jest.mock("./Api", () => {
+  const statusInstance = {
+    markRunStarted: jest.fn(),
+    markRunSucceeded: jest.fn(),
+    markRunFailed: jest.fn(),
+    setScheduler: jest.fn(),
+    setConfigIssues: jest.fn(),
+    snapshot: jest.fn(),
+  };
+  const server = {
+    listen: jest.fn(async () => undefined),
+    close: jest.fn(async () => undefined),
+  };
+  return {
+    SyncStatus: jest.fn(() => statusInstance),
+    createApiServer: jest.fn(() => server),
+    __statusInstance: statusInstance,
+    __apiServer: server,
+  };
+});
+
 jest.mock("@devopsplaybook.io/otel-utils", () => ({
   StandardTracer: jest.fn(() => ({
     shutdown: jest.fn(async () => undefined),
@@ -52,6 +73,8 @@ jest.mock("./Config", () => {
     SYNC_CRON_SCHEDULE: "*/5 * * * *",
     JOB_MODE: false,
     SYNC_ALLOWED_PARTIAL_FAILURES: 0,
+    API_PORT: 8080,
+    API_HOST: "0.0.0.0",
     LOG_LEVEL: "info",
     ANNOTATION_PREFIX: "secrets.cloudsync.devopsplaybook.io",
     SECRET_NAME_PREFIX: "cloudsync-",
@@ -140,6 +163,21 @@ const { __moduleLogger: appLogger, __standardLogger: standardLogger } =
 const { StandardTracer, StandardMeter } = jest.requireMock(
   "@devopsplaybook.io/otel-utils",
 ) as { StandardTracer: jest.Mock; StandardMeter: jest.Mock };
+const {
+  __statusInstance: statusInstance,
+  __apiServer: apiServer,
+  createApiServer: mockCreateApiServer,
+} = jest.requireMock("./Api") as {
+  __statusInstance: {
+    markRunStarted: jest.Mock;
+    markRunSucceeded: jest.Mock;
+    markRunFailed: jest.Mock;
+    setScheduler: jest.Mock;
+    setConfigIssues: jest.Mock;
+  };
+  __apiServer: { listen: jest.Mock; close: jest.Mock };
+  createApiServer: jest.Mock;
+};
 
 function syncResult(overrides: Partial<SyncRunResult> = {}): SyncRunResult {
   return {
@@ -221,6 +259,8 @@ describe("App main", () => {
     configInstance.SYNC_CRON_SCHEDULE = "*/5 * * * *";
     configInstance.JOB_MODE = false;
     configInstance.SYNC_ALLOWED_PARTIAL_FAILURES = 0;
+    configInstance.API_PORT = 8080;
+    configInstance.API_HOST = "0.0.0.0";
     configInstance.LOG_LEVEL = "info";
     configInstance.ANNOTATION_PREFIX = "secrets.cloudsync.devopsplaybook.io";
     configInstance.reload.mockResolvedValue(undefined);
@@ -250,6 +290,55 @@ describe("App main", () => {
     expect(mockSchedule.mock.invocationCallOrder[0]).toBeLessThan(
       secretSyncInstance.runSync.mock.invocationCallOrder[0],
     );
+    expect(statusInstance.setScheduler).toHaveBeenCalledWith("*/5 * * * *");
+    expect(statusInstance.setConfigIssues).toHaveBeenCalledWith([]);
+  });
+
+  it("starts the HTTP API before scheduling and the initial sync", async () => {
+    await main();
+
+    expect(mockCreateApiServer).toHaveBeenCalledTimes(1);
+    const options = mockCreateApiServer.mock.calls[0][0];
+    expect(options.config).toBe(configInstance);
+    expect(options.status).toBe(statusInstance);
+    expect(options.runner).toBeDefined();
+    expect(options.tracer).toBe(StandardTracer.mock.results[0].value);
+    expect(options.logger).toBe(standardLogger);
+    expect(apiServer.listen).toHaveBeenCalledWith({
+      port: 8080,
+      host: "0.0.0.0",
+    });
+    expect(apiServer.listen.mock.invocationCallOrder[0]).toBeLessThan(
+      mockSchedule.mock.invocationCallOrder[0],
+    );
+    expect(apiServer.listen.mock.invocationCallOrder[0]).toBeLessThan(
+      secretSyncInstance.runSync.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("records sync lifecycle in the shared status tracker", async () => {
+    secretSyncInstance.runSync.mockResolvedValue(syncResult({ namespaces: 1 }));
+
+    await main();
+
+    expect(statusInstance.markRunStarted).toHaveBeenCalledTimes(1);
+    expect(statusInstance.markRunSucceeded).toHaveBeenCalledWith(
+      expect.objectContaining({ namespaces: 1 }),
+    );
+    expect(statusInstance.markRunFailed).not.toHaveBeenCalled();
+    expect(statusInstance.markRunStarted.mock.invocationCallOrder[0]).toBeLessThan(
+      secretSyncInstance.runSync.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("records a failed initial sync in the status tracker", async () => {
+    secretSyncInstance.runSync.mockRejectedValue(new Error("boom"));
+
+    await main();
+
+    expect(statusInstance.markRunFailed).toHaveBeenCalledWith(
+      expect.any(Error),
+    );
   });
 
   it("fails startup on an invalid cron schedule before initializing", async () => {
@@ -259,6 +348,8 @@ describe("App main", () => {
 
     expect(mockSchedule).not.toHaveBeenCalled();
     expect(secretSyncInstance.runSync).not.toHaveBeenCalled();
+    expect(mockCreateApiServer).not.toHaveBeenCalled();
+    expect(apiServer.listen).not.toHaveBeenCalled();
   });
 
   it("does not start a second sync when a cron tick fires during a run", async () => {
@@ -315,6 +406,8 @@ describe("App main", () => {
       );
       expect(mockWatchFile).not.toHaveBeenCalled();
       expect(mockSchedule).not.toHaveBeenCalled();
+      expect(mockCreateApiServer).not.toHaveBeenCalled();
+      expect(apiServer.listen).not.toHaveBeenCalled();
     });
 
     it("exits 1 when the namespace listing failed", async () => {
@@ -444,6 +537,27 @@ describe("App main", () => {
       expect(appLogger.error).toHaveBeenCalledWith(
         expect.stringContaining("Invalid cron schedule"),
       );
+      expect(statusInstance.setConfigIssues).toHaveBeenCalledWith([
+        'Invalid SYNC_CRON_SCHEDULE: "not-a-cron"',
+      ]);
+    });
+
+    it("reports a failed config reload in the status", async () => {
+      await main();
+      statusInstance.setConfigIssues.mockClear();
+      configInstance.reload.mockRejectedValue(new Error("bad json"));
+      const listener = mockWatchFile.mock.calls[0][2] as () => void;
+
+      jest.useFakeTimers();
+      listener();
+      jest.advanceTimersByTime(1000);
+      jest.useRealTimers();
+      await flushPromises();
+      await flushPromises();
+
+      expect(statusInstance.setConfigIssues).toHaveBeenCalledWith([
+        "Config reload failed: bad json",
+      ]);
     });
 
     it("warns about restart-only settings without logging their values", async () => {
@@ -494,6 +608,10 @@ describe("App main", () => {
 
     expect(codes).toEqual([0]);
     expect(mockSchedule.mock.results[0].value.destroy).toHaveBeenCalledTimes(1);
+    expect(apiServer.close).toHaveBeenCalledTimes(1);
+    expect(apiServer.close.mock.invocationCallOrder[0]).toBeLessThan(
+      standardLogger.shutdown.mock.invocationCallOrder[0],
+    );
     expect(standardLogger.shutdown).toHaveBeenCalledTimes(1);
   });
 });
