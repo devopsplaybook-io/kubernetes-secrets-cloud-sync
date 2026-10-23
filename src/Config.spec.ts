@@ -26,6 +26,9 @@ describe("Config", () => {
     delete process.env.JOB_MODE;
     delete process.env.ANNOTATION_PREFIX;
     delete process.env.SYNC_CRON_SCHEDULE;
+    delete process.env.DELETE_ORPHANED_SECRETS;
+    delete process.env.ORPHAN_CLEANUP_DRY_RUN;
+    delete process.env.ORPHAN_CLEANUP_MAX_DELETIONS;
   });
 
   afterEach(() => {
@@ -59,6 +62,8 @@ describe("Config", () => {
       );
       expect(config.SECRET_NAME_PREFIX).toBe("cloudsync-");
       expect(config.DELETE_ORPHANED_SECRETS).toBe(false);
+      expect(config.ORPHAN_CLEANUP_DRY_RUN).toBe(false);
+      expect(config.ORPHAN_CLEANUP_MAX_DELETIONS).toBe(50);
     });
   });
 
@@ -138,6 +143,32 @@ describe("Config", () => {
       const config = new Config();
       await config.reload();
       expect(config.DELETE_ORPHANED_SECRETS).toBe("1");
+    });
+
+    it("should load orphan cleanup settings from config.json", async () => {
+      mockReadJson.mockResolvedValue({
+        ORPHAN_CLEANUP_DRY_RUN: true,
+        ORPHAN_CLEANUP_MAX_DELETIONS: 10,
+      });
+
+      const config = new Config();
+      await config.reload();
+      expect(config.ORPHAN_CLEANUP_DRY_RUN).toBe(true);
+      expect(config.ORPHAN_CLEANUP_MAX_DELETIONS).toBe(10);
+    });
+
+    it("should let environment variables override orphan cleanup settings", async () => {
+      process.env.ORPHAN_CLEANUP_DRY_RUN = "true";
+      process.env.ORPHAN_CLEANUP_MAX_DELETIONS = "7";
+      mockReadJson.mockResolvedValue({
+        ORPHAN_CLEANUP_DRY_RUN: false,
+        ORPHAN_CLEANUP_MAX_DELETIONS: 10,
+      });
+
+      const config = new Config();
+      await config.reload();
+      expect(config.ORPHAN_CLEANUP_DRY_RUN).toBe("true");
+      expect(config.ORPHAN_CLEANUP_MAX_DELETIONS).toBe("7");
     });
   });
 });
