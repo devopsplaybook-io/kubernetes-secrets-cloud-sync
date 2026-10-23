@@ -4,7 +4,9 @@ import {
   StandardTracer,
 } from "@devopsplaybook.io/otel-utils";
 import { watchFile } from "fs-extra";
+import { FastifyInstance } from "fastify";
 import cron, { ScheduledTask } from "node-cron";
+import { SyncStatus, createApiServer } from "./Api";
 import { Config } from "./Config";
 import { KubernetesClient } from "./KubernetesClient";
 import { AlibabaKmsSource } from "./sources/AlibabaKmsSource";
@@ -44,6 +46,8 @@ const RESTART_ONLY_FIELDS: string[] = [
   "OPENTELEMETRY_COLLECTOR_EXPORT_METRICS_INTERVAL_SECONDS",
   "OPENTELEMETRY_COLLECT_AUTHORIZATION_HEADER",
   "LOG_LEVEL",
+  "API_PORT",
+  "API_HOST",
 ];
 
 interface TelemetryBundle {
@@ -54,6 +58,7 @@ interface TelemetryBundle {
 }
 
 let telemetry: TelemetryBundle | undefined;
+let apiServer: FastifyInstance | undefined;
 let cronTask: ScheduledTask | undefined;
 let activeCronExpression: string | undefined;
 let reloadDebounceTimer: NodeJS.Timeout | undefined;
@@ -177,6 +182,7 @@ export async function main(): Promise<void> {
   reloadChain = Promise.resolve();
   shuttingDown = false;
   telemetry = undefined;
+  apiServer = undefined;
   if (reloadDebounceTimer) {
     clearTimeout(reloadDebounceTimer);
     reloadDebounceTimer = undefined;
@@ -226,9 +232,18 @@ export async function main(): Promise<void> {
 
   // Initialize the sync orchestrator
   const secretSync = new SecretSync(k8sClient, sources, config);
-  const runner = new SingleFlightRunner<SyncRunResult>(() =>
-    secretSync.runSync(),
-  );
+  const status = new SyncStatus();
+  const runner = new SingleFlightRunner<SyncRunResult>(async () => {
+    status.markRunStarted();
+    try {
+      const result = await secretSync.runSync();
+      status.markRunSucceeded(result);
+      return result;
+    } catch (error) {
+      status.markRunFailed(error);
+      throw error;
+    }
+  });
 
   if (jobMode) {
     await runJobMode(config, runner);
@@ -242,6 +257,7 @@ export async function main(): Promise<void> {
       logger.error(
         `Invalid cron schedule: ${expression}; keeping the previous schedule`,
       );
+      status.setConfigIssues([`Invalid SYNC_CRON_SCHEDULE: "${expression}"`]);
       return;
     }
     if (cronTask) {
@@ -257,6 +273,8 @@ export async function main(): Promise<void> {
       { noOverlap: true },
     );
     activeCronExpression = expression;
+    status.setScheduler(expression);
+    status.setConfigIssues([]);
     logger.info(`Scheduled sync with cron: ${expression}`);
   };
 
@@ -266,6 +284,10 @@ export async function main(): Promise<void> {
     warnRestartOnlyChanges(config, restartOnlySnapshot);
     if (config.SYNC_CRON_SCHEDULE !== activeCronExpression) {
       await schedule(config.SYNC_CRON_SCHEDULE);
+    } else {
+      // The schedule did not change: clear any issue from an earlier reload.
+      status.setConfigIssues([]);
+      status.setScheduler(activeCronExpression ?? null);
     }
   };
 
@@ -279,9 +301,12 @@ export async function main(): Promise<void> {
       }
       reloadDebounceTimer = setTimeout(() => {
         reloadDebounceTimer = undefined;
-        reloadChain = reloadChain
-          .then(applyReload)
-          .catch((error) => logger.error("Failed to reload config", toError(error)));
+        reloadChain = reloadChain.then(applyReload).catch((error) => {
+          logger.error("Failed to reload config", toError(error));
+          status.setConfigIssues([
+            `Config reload failed: ${toError(error).message}`,
+          ]);
+        });
       }, CONFIG_RELOAD_DEBOUNCE_MS);
     },
   );
@@ -300,6 +325,12 @@ export async function main(): Promise<void> {
       await cronTask?.destroy();
     } catch (error) {
       logger.error("Failed to stop the cron task", toError(error));
+    }
+    // Close the server before draining so no new manual run can start.
+    try {
+      await apiServer?.close();
+    } catch (error) {
+      logger.error("Failed to close the HTTP API", toError(error));
     }
     await runner.whenIdle();
     await shutdownTelemetry();
@@ -321,6 +352,18 @@ export async function main(): Promise<void> {
     ["SIGINT", onSigint],
   ];
 
+  // Listen before the first cycle so probes succeed while it runs; a manual
+  // trigger during the initial sync hits the same single-flight runner (409).
+  apiServer = createApiServer({
+    config,
+    runner,
+    status,
+    tracer: telemetry.tracer,
+    logger: telemetry.logger,
+  });
+  await apiServer.listen({ port: config.API_PORT, host: config.API_HOST });
+  logger.info(`HTTP API listening on ${config.API_HOST}:${config.API_PORT}`);
+
   // Schedule periodic sync *before* the initial sync so a stalled initial
   // sync cannot prevent future cycles. `noOverlap` and the single-flight
   // runner keep a cron tick from running concurrently with a slow cycle.
@@ -337,6 +380,7 @@ export async function main(): Promise<void> {
 if (require.main === module) {
   main().catch(async (error) => {
     logger.error("Fatal error during startup", toError(error));
+    await apiServer?.close().catch(() => undefined);
     await shutdownTelemetry();
     process.exit(1);
   });

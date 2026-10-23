@@ -1,5 +1,7 @@
 {
   "SYNC_CRON_SCHEDULE": "*/5 * * * *",
+  "API_PORT": 8080,
+  "API_HOST": "0.0.0.0",
   "ANNOTATION_PREFIX": "secrets.cloudsync.devopsplaybook.io",
   "SECRET_NAME_PREFIX": "cloudsync-",
   "ALIBABA_KMS_REGION": "",

@@ -24,6 +24,10 @@ Recommendations:
   credentials, one controller instance per trust boundary).
 - Review the ClusterRole: orphan cleanup requires list access to Secrets across
   namespaces; restrict it if that risk outweighs the benefit.
+- The HTTP API (deployment mode) has no built-in authentication. Keep the
+  listener cluster-internal (ClusterIP Service and/or a NetworkPolicy) and
+  never expose `POST /api/sync` publicly: anyone who can reach it can start a
+  sync.
 
 No per-namespace allow-list is built into the controller: isolation relies on
 Kubernetes RBAC and admission policies.
@@ -32,7 +36,8 @@ Kubernetes RBAC and admission policies.
 
 1. The service runs inside a Kubernetes cluster and periodically scans all namespaces
 2. It looks for annotations on namespaces that specify which cloud secrets to sync
-3. It fetches the specified secrets from cloud providers (currently Alibaba KMS)
+3. It fetches the specified secrets from the configured cloud providers
+   (Alibaba KMS, AWS Secrets Manager and Restic are supported)
 4. It creates or updates Kubernetes Secret resources in the annotated namespaces
 
 ## Namespace Annotation Convention
@@ -256,7 +261,8 @@ Configuration can be set via `config.json` or environment variables:
 | `RESTIC_TIMEOUT_SECONDS`               | `120`                                 | Per-invocation restic timeout (SIGKILL)      |
 | `RESTIC_RETRIES`                       | `2`                                   | Retries for transient restic failures        |
 | `LOG_LEVEL`                            | `info`                                | Log level                                    |
-| `API_PORT`                             | `8080`                                | HTTP API port                                |
+| `API_HOST`                             | `0.0.0.0`                             | HTTP API listen address (deployment mode)    |
+| `API_PORT`                             | `8080`                                | HTTP API port (validation, 1-65535)          |
 
 ### Configuration reload
 
@@ -276,9 +282,10 @@ Applied on the next cycle without a restart:
   `RESTIC_TIMEOUT_SECONDS`, `RESTIC_RETRIES`.
 
 Restart-only settings (`JOB_MODE`, `ANNOTATION_PREFIX`, `SECRET_NAME_PREFIX`,
-cloud regions and credentials, `LOG_LEVEL` and all `OPENTELEMETRY_*` keys) are
-read once at startup. When a reload changes one of them, the service logs a
-warning naming the key and asking for a restart; values are never logged.
+`API_HOST`, `API_PORT`, cloud regions and credentials, `LOG_LEVEL` and all
+`OPENTELEMETRY_*` keys) are read once at startup. When a reload changes one of
+them, the service logs a warning naming the key and asking for a restart;
+values are never logged.
 
 The watcher is skipped entirely in job mode, which exits after a single run.
 
@@ -309,7 +316,10 @@ exports traces and logs. Each cycle is wrapped in a `sync-run` span with
 attributes for namespace/secret counts, successes, errors, failed namespaces,
 duration and whether the namespace listing succeeded; child spans cover each
 source `beginCycle`/`fetchSecret`/`endCycle` and every Kubernetes API call.
-No custom metrics are emitted.
+HTTP requests under `/api` are traced with `@devopsplaybook.io/otel-utils-fastify`
+server spans; `/api/status` is excluded to keep probe traffic out of the
+traces, and unmatched routes use a bounded span name. No custom metrics are
+emitted: the Fastify plugin is registered without a meter.
 
 On `SIGTERM`/`SIGINT` the service stops scheduling, waits for the in-flight
 sync to finish and shuts the logger, tracer and meter down before exiting, so
@@ -332,10 +342,92 @@ error messages: URL userinfo (`scheme://user:pass@host`) becomes
 
 ## API Endpoints
 
-| Method | Path          | Description               |
-| ------ | ------------- | ------------------------- |
-| GET    | `/api/status` | Health check              |
-| POST   | `/api/sync`   | Trigger an immediate sync |
+The HTTP API is available in **deployment mode only**. Job mode
+(`JOB_MODE=true`) runs one sync and exits without listening. The server listens
+on `API_HOST` (default `0.0.0.0`) and `API_PORT` (default `8080`); both are read
+at startup, so changing them requires a restart.
+
+The API is **unauthenticated**: keep it cluster-internal (ClusterIP Service
+and/or a NetworkPolicy) and never expose `POST /api/sync` outside the cluster.
+
+### `GET /api/status`
+
+Readiness and diagnostics endpoint. It returns `200` with `status: "ok"` while
+the configuration is valid and `503` with `status: "degraded"` when a critical
+configuration value is invalid (an invalid `SYNC_CRON_SCHEDULE` introduced by
+a hot reload, or a failed configuration reload). It also reports the last sync:
+
+```json
+{
+  "status": "ok",
+  "service": "kubernetes-secrets-cloud-sync",
+  "version": "0.10.0",
+  "mode": "deployment",
+  "running": true,
+  "uptimeSeconds": 12,
+  "config": { "valid": true, "issues": [] },
+  "scheduler": { "cron": "*/5 * * * *" },
+  "sync": {
+    "inFlight": false,
+    "lastStart": "2026-10-23T18:00:00.000Z",
+    "lastEnd": "2026-10-23T18:00:02.000Z",
+    "lastOutcome": "success",
+    "lastError": null,
+    "lastResult": {
+      "namespaces": 2,
+      "secrets": 5,
+      "succeededSecrets": 5,
+      "errors": 0,
+      "failedNamespaces": [],
+      "namespaceListSucceeded": true,
+      "durationMs": 2000
+    }
+  }
+}
+```
+
+`sync.lastOutcome` is `success` for a clean run, `partial` when some operations
+failed but data was synced, and `failure` when the namespace listing failed or
+nothing requested could be fetched. `sync.inFlight` and the last-run fields are
+informational: a failed sync does **not** change the status code, so a cloud
+outage never causes a pod restart. The state is in-memory and resets when the
+process restarts. Requests are traced, except `GET /api/status` itself (probe
+noise), and no custom metrics are emitted.
+
+### `POST /api/sync`
+
+Starts a sync immediately and returns `202` with `{"status":"accepted"}`. The
+sync runs through the same single-flight runner as cron ticks and the initial
+sync, so it can never overlap with them; while a run is in progress the
+endpoint returns `409` with `{"status":"already_running"}`. The request body is
+ignored.
+
+```bash
+curl -s localhost:8080/api/status
+curl -X POST localhost:8080/api/sync
+```
+
+### Kubernetes probes
+
+The server starts before the initial sync and stays up while a sync is in
+flight, so readiness can follow the status code. Recommended probes for the
+Deployment:
+
+```yaml
+readinessProbe:
+  httpGet:
+    path: /api/status
+    port: 8080
+  periodSeconds: 10
+livenessProbe:
+  tcpSocket:
+    port: 8080
+  periodSeconds: 20
+```
+
+Liveness deliberately uses a TCP check: `GET /api/status` returns `503` for an
+invalid configuration, and restarting the container cannot fix a configuration
+error, so using the HTTP status for liveness would cause a restart loop.
 
 ## Deployment to Kubernetes
 
@@ -345,14 +437,15 @@ The service is designed to run inside a Kubernetes cluster as a CronJob (job mod
 
 Because the service scans all namespaces for annotations and creates secrets in arbitrary namespaces, it needs a **ClusterRole**. Below are the minimum required permissions:
 
-The controller reads (`get`) a Secret before writing and updates it with a JSON
-`patch`; `update` is no longer used. Keep `get`, `patch`, `create`, `list` and
-`delete` when reviewing the deployed ClusterRole.
+The controller lists namespaces, reads (`get`) a Secret before writing and
+updates it with a JSON `patch`; `update` is not used. Keep `list` for
+namespaces and `get`, `list`, `create`, `patch`, `delete` for Secrets when
+reviewing the deployed ClusterRole.
 
-| Resource     | Verbs                                                | Reason                                                                |
-| ------------ | ---------------------------------------------------- | --------------------------------------------------------------------- |
-| `namespaces` | `get`, `list`                                        | Scan all namespaces for sync annotations                              |
-| `secrets`    | `get`, `list`, `create`, `update`, `patch`, `delete` | Create/update synced secrets, list managed secrets for orphan cleanup |
+| Resource     | Verbs                                        | Reason                                                                |
+| ------------ | -------------------------------------------- | --------------------------------------------------------------------- |
+| `namespaces` | `list`                                       | Scan all namespaces for sync annotations                              |
+| `secrets`    | `get`, `list`, `create`, `patch`, `delete`   | Read for the ownership guard, create/patch synced secrets, list managed secrets for orphan cleanup, delete orphans |
 
 ### Full Deployment Example
 
@@ -388,10 +481,10 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["namespaces"]
-    verbs: ["get", "list"]
+    verbs: ["list"]
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get", "list", "create", "update", "patch", "delete"]
+    verbs: ["get", "list", "create", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -517,6 +610,15 @@ spec:
               value: "*/5 * * * *"
           ports:
             - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /api/status
+              port: 8080
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 8080
+            periodSeconds: 20
           resources:
             limits:
               memory: 500Mi

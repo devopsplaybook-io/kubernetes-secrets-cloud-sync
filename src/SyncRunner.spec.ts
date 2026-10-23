@@ -71,6 +71,30 @@ describe("SingleFlightRunner", () => {
     await expect(runner.run()).resolves.toBe(42);
   });
 
+  it("reports whether a run is in flight", async () => {
+    const gate = deferred();
+    const runner = new SingleFlightRunner(async () => {
+      await gate.promise;
+    });
+
+    expect(runner.isRunning()).toBe(false);
+    const running = runner.run();
+    expect(runner.isRunning()).toBe(true);
+
+    gate.resolve();
+    await running;
+    expect(runner.isRunning()).toBe(false);
+  });
+
+  it("reports not running after a rejected run", async () => {
+    const runner = new SingleFlightRunner(async () => {
+      throw new Error("boom");
+    });
+
+    await expect(runner.run()).rejects.toThrow("boom");
+    expect(runner.isRunning()).toBe(false);
+  });
+
   it("whenIdle resolves immediately when no run is in flight", async () => {
     const runner = new SingleFlightRunner(async () => undefined);
 
