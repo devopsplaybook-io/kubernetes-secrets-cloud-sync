@@ -5,6 +5,30 @@ import path from "path";
 
 const logger = OTelLogger().createModuleLogger("config");
 
+/**
+ * Parse an integer from an env/config value and keep it inside [min, max].
+ * Missing, non-numeric and below-minimum values fall back to `fallback`;
+ * values above the maximum are clamped.
+ */
+export function parseBoundedInt(
+  value: unknown,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  if (value === undefined || value === null || value === "") {
+    return fallback;
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed)) {
+    return fallback;
+  }
+  if (parsed < min) {
+    return fallback;
+  }
+  return Math.min(parsed, max);
+}
+
 export class Config implements ConfigOTelInterface {
   //
   public readonly CONFIG_FILE: string = "config.json";
@@ -27,6 +51,8 @@ export class Config implements ConfigOTelInterface {
   public DELETE_ORPHANED_SECRETS = false;
   public ORPHAN_CLEANUP_DRY_RUN = false;
   public ORPHAN_CLEANUP_MAX_DELETIONS: number | string = 50;
+  public SYNC_FETCH_CONCURRENCY = 4;
+  public SYNC_WRITE_CONCURRENCY = 4;
 
   // Alibaba KMS configuration
   public ALIBABA_KMS_REGION = "";
@@ -43,6 +69,8 @@ export class Config implements ConfigOTelInterface {
   public RESTIC_PASSWORD = "";
   public RESTIC_PATH = "";
   public RESTIC_OPTIONS = "";
+  public RESTIC_TIMEOUT_SECONDS = 120;
+  public RESTIC_RETRIES = 2;
 
   constructor() {
     let version = "1";
@@ -80,6 +108,28 @@ export class Config implements ConfigOTelInterface {
         );
       }
     };
+    const setBoundedIntIfSet = (
+      field: string,
+      fallback: number,
+      min: number,
+      max: number,
+    ) => {
+      let fromEnv = "defaults";
+      let raw: unknown;
+      const self = this as Record<string, any>;
+      if (process.env[field] !== undefined) {
+        raw = process.env[field];
+        fromEnv = "environment";
+      } else if (content[field] !== undefined) {
+        raw = content[field];
+        fromEnv = "config";
+      }
+      self[field] = parseBoundedInt(raw, fallback, min, max);
+      logger.info(
+        `Configuration Value: ${field}: ${self[field]} (from ${fromEnv})`,
+      );
+    };
+
     logger.info(`Configuration Value: CONFIG_FILE: ${this.CONFIG_FILE}`);
     logger.info(`Configuration Value: VERSION: ${this.VERSION}`);
     setIfSet("LOG_LEVEL");
@@ -99,6 +149,8 @@ export class Config implements ConfigOTelInterface {
     setIfSet("DELETE_ORPHANED_SECRETS");
     setIfSet("ORPHAN_CLEANUP_DRY_RUN");
     setIfSet("ORPHAN_CLEANUP_MAX_DELETIONS");
+    setBoundedIntIfSet("SYNC_FETCH_CONCURRENCY", 4, 1, 32);
+    setBoundedIntIfSet("SYNC_WRITE_CONCURRENCY", 4, 1, 32);
 
     // Alibaba KMS configuration
     setIfSet("ALIBABA_KMS_REGION");
@@ -115,5 +167,7 @@ export class Config implements ConfigOTelInterface {
     setIfSet("RESTIC_PASSWORD", false);
     setIfSet("RESTIC_PATH");
     setIfSet("RESTIC_OPTIONS");
+    setBoundedIntIfSet("RESTIC_TIMEOUT_SECONDS", 120, 1, 3600);
+    setBoundedIntIfSet("RESTIC_RETRIES", 2, 0, 10);
   }
 }

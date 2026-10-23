@@ -8,6 +8,7 @@ export const SOURCE_NAME_ANNOTATION = `${CLOUDSYNC_DOMAIN}/source-name`;
 export const INSTANCE_LABEL = `${CLOUDSYNC_DOMAIN}/instance`;
 export const ADOPT_ANNOTATION = `${CLOUDSYNC_DOMAIN}/adopt`;
 export const SECRET_NAME_LABEL = `${CLOUDSYNC_DOMAIN}/secret-name`;
+export const DATA_HASH_ANNOTATION = `${CLOUDSYNC_DOMAIN}/data-hash`;
 
 export const MAX_SECRET_NAME_LENGTH = 253;
 export const MAX_LABEL_VALUE_LENGTH = 63;

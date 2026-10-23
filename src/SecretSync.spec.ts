@@ -30,6 +30,8 @@ describe("SecretSync", () => {
     init: jest.fn(),
     fetchSecret: jest.fn(),
     isAvailable: jest.fn(),
+    beginCycle: jest.fn(),
+    endCycle: jest.fn(),
   };
 
   const mockSourceB: jest.Mocked<SecretSource> = {
@@ -37,21 +39,28 @@ describe("SecretSync", () => {
     init: jest.fn(),
     fetchSecret: jest.fn(),
     isAvailable: jest.fn(),
+    beginCycle: jest.fn(),
+    endCycle: jest.fn(),
   };
 
   // Mock config
   const createMockConfig = (
     deleteOrphans: boolean = false,
+    overrides: Partial<Config> = {},
   ): Partial<Config> => ({
     DELETE_ORPHANED_SECRETS: deleteOrphans,
     ORPHAN_CLEANUP_DRY_RUN: false,
     ORPHAN_CLEANUP_MAX_DELETIONS: 50,
+    SYNC_FETCH_CONCURRENCY: 4,
+    SYNC_WRITE_CONCURRENCY: 4,
+    ...overrides,
   });
 
   beforeEach(() => {
-    jest.clearAllMocks();
+    jest.resetAllMocks();
     mockSourceA.isAvailable.mockReturnValue(true);
     mockSourceB.isAvailable.mockReturnValue(true);
+    mockUpsertSecret.mockResolvedValue("updated");
   });
 
   describe("runSync", () => {
@@ -416,6 +425,312 @@ describe("SecretSync", () => {
         "safe-secret",
         { key: "value" },
       );
+    });
+
+    it("should fetch a duplicate secret once and write it per namespace", async () => {
+      mockGetNamespaceSyncRequests.mockResolvedValue([
+        {
+          namespace: "ns-a",
+          annotations: [
+            { provider: "alibaba-kms", secretNames: ["shared", "a-only"] },
+          ],
+        },
+        {
+          namespace: "ns-b",
+          annotations: [
+            { provider: "alibaba-kms", secretNames: ["shared", "b-only"] },
+          ],
+        },
+      ]);
+
+      mockSourceA.fetchSecret.mockImplementation(async (secretName: string) => ({
+        provider: "alibaba-kms",
+        secretName,
+        data: { key: secretName },
+      }));
+
+      const sync = new SecretSync(
+        mockK8sClient as unknown as KubernetesClient,
+        [mockSourceA],
+        createMockConfig() as Config,
+      );
+      await sync.runSync();
+
+      expect(mockSourceA.fetchSecret).toHaveBeenCalledTimes(3);
+      expect(
+        mockSourceA.fetchSecret.mock.calls.map((call) => call[0]).sort(),
+      ).toEqual(["a-only", "b-only", "shared"]);
+      expect(mockUpsertSecret).toHaveBeenCalledTimes(4);
+      expect(mockUpsertSecret).toHaveBeenCalledWith("ns-a", "shared", {
+        key: "shared",
+      });
+      expect(mockUpsertSecret).toHaveBeenCalledWith("ns-b", "shared", {
+        key: "shared",
+      });
+      expect(mockSourceA.beginCycle).toHaveBeenCalledTimes(1);
+      expect(
+        (mockSourceA.beginCycle.mock.calls[0][0] as string[]).sort(),
+      ).toEqual(["a-only", "b-only", "shared"]);
+      expect(mockSourceA.endCycle).toHaveBeenCalledTimes(1);
+    });
+
+    it("should fetch the same name once per provider", async () => {
+      mockGetNamespaceSyncRequests.mockResolvedValue([
+        {
+          namespace: "ns-a",
+          annotations: [{ provider: "alibaba-kms", secretNames: ["shared"] }],
+        },
+        {
+          namespace: "ns-b",
+          annotations: [
+            { provider: "aws-secretsmanager", secretNames: ["shared"] },
+          ],
+        },
+      ]);
+
+      mockSourceA.fetchSecret.mockResolvedValue({
+        provider: "alibaba-kms",
+        secretName: "shared",
+        data: { key: "a" },
+      });
+      mockSourceB.fetchSecret.mockResolvedValue({
+        provider: "aws-secretsmanager",
+        secretName: "shared",
+        data: { key: "b" },
+      });
+
+      const sync = new SecretSync(
+        mockK8sClient as unknown as KubernetesClient,
+        [mockSourceA, mockSourceB],
+        createMockConfig() as Config,
+      );
+      await sync.runSync();
+
+      expect(mockSourceA.fetchSecret).toHaveBeenCalledTimes(1);
+      expect(mockSourceB.fetchSecret).toHaveBeenCalledTimes(1);
+      expect(mockUpsertSecret).toHaveBeenCalledTimes(2);
+      expect(mockSourceA.beginCycle).toHaveBeenCalledWith(["shared"]);
+      expect(mockSourceB.beginCycle).toHaveBeenCalledWith(["shared"]);
+    });
+
+    it("should cache a failed fetch and still write the other secrets", async () => {
+      mockGetNamespaceSyncRequests.mockResolvedValue([
+        {
+          namespace: "ns-a",
+          annotations: [
+            { provider: "alibaba-kms", secretNames: ["broken", "fine"] },
+          ],
+        },
+        {
+          namespace: "ns-b",
+          annotations: [
+            { provider: "alibaba-kms", secretNames: ["broken", "fine"] },
+          ],
+        },
+      ]);
+
+      mockSourceA.fetchSecret.mockImplementation(async (secretName: string) => {
+        if (secretName === "broken") {
+          throw new Error("fetch failed");
+        }
+        return {
+          provider: "alibaba-kms",
+          secretName,
+          data: { key: secretName },
+        };
+      });
+
+      const sync = new SecretSync(
+        mockK8sClient as unknown as KubernetesClient,
+        [mockSourceA],
+        createMockConfig() as Config,
+      );
+      await sync.runSync();
+
+      // One attempt per unique name, not per reference.
+      expect(mockSourceA.fetchSecret).toHaveBeenCalledTimes(2);
+      expect(mockUpsertSecret).toHaveBeenCalledTimes(2);
+      expect(
+        mockUpsertSecret.mock.calls.every((call) => call[1] === "fine"),
+      ).toBe(true);
+    });
+
+    it("should call endCycle even when writes fail", async () => {
+      mockGetNamespaceSyncRequests.mockResolvedValue([
+        {
+          namespace: "ns-a",
+          annotations: [{ provider: "alibaba-kms", secretNames: ["secret-a"] }],
+        },
+      ]);
+      mockSourceA.fetchSecret.mockResolvedValue({
+        provider: "alibaba-kms",
+        secretName: "secret-a",
+        data: { key: "value" },
+      });
+      mockUpsertSecret.mockRejectedValue(new Error("K8s API error"));
+
+      const sync = new SecretSync(
+        mockK8sClient as unknown as KubernetesClient,
+        [mockSourceA],
+        createMockConfig() as Config,
+      );
+      await sync.runSync();
+
+      expect(mockSourceA.endCycle).toHaveBeenCalledTimes(1);
+    });
+
+    it("should not fetch colliding secret names", async () => {
+      mockGetNamespaceSyncRequests.mockResolvedValue([
+        {
+          namespace: "default",
+          annotations: [
+            {
+              provider: "alibaba-kms",
+              secretNames: ["prod/app/db", "prod-app-db", "safe-secret"],
+            },
+          ],
+        },
+      ]);
+
+      mockSourceA.fetchSecret.mockResolvedValue({
+        provider: "alibaba-kms",
+        secretName: "safe-secret",
+        data: { key: "value" },
+      });
+
+      const sync = new SecretSync(
+        mockK8sClient as unknown as KubernetesClient,
+        [mockSourceA],
+        createMockConfig() as Config,
+      );
+      await sync.runSync();
+
+      expect(mockSourceA.fetchSecret).toHaveBeenCalledTimes(1);
+      expect(mockSourceA.fetchSecret).toHaveBeenCalledWith("safe-secret");
+      expect(mockSourceA.beginCycle).toHaveBeenCalledWith(["safe-secret"]);
+      expect(mockUpsertSecret).toHaveBeenCalledTimes(1);
+    });
+
+    it("should respect the fetch concurrency limit", async () => {
+      mockGetNamespaceSyncRequests.mockResolvedValue([
+        {
+          namespace: "default",
+          annotations: [
+            {
+              provider: "alibaba-kms",
+              secretNames: Array.from({ length: 6 }, (_, i) => `secret-${i}`),
+            },
+          ],
+        },
+      ]);
+
+      let inFlight = 0;
+      let maxInFlight = 0;
+      mockSourceA.fetchSecret.mockImplementation(async (secretName: string) => {
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        inFlight--;
+        return {
+          provider: "alibaba-kms",
+          secretName,
+          data: { key: secretName },
+        };
+      });
+
+      const sync = new SecretSync(
+        mockK8sClient as unknown as KubernetesClient,
+        [mockSourceA],
+        createMockConfig(false, { SYNC_FETCH_CONCURRENCY: 2 }) as Config,
+      );
+      await sync.runSync();
+
+      expect(maxInFlight).toBe(2);
+      expect(mockUpsertSecret).toHaveBeenCalledTimes(6);
+    });
+
+    it("should respect the write concurrency limit", async () => {
+      mockGetNamespaceSyncRequests.mockResolvedValue([
+        {
+          namespace: "default",
+          annotations: [
+            {
+              provider: "alibaba-kms",
+              secretNames: Array.from({ length: 6 }, (_, i) => `secret-${i}`),
+            },
+          ],
+        },
+      ]);
+
+      mockSourceA.fetchSecret.mockImplementation(async (secretName: string) => ({
+        provider: "alibaba-kms",
+        secretName,
+        data: { key: secretName },
+      }));
+
+      let inFlight = 0;
+      let maxInFlight = 0;
+      mockUpsertSecret.mockImplementation(async () => {
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        inFlight--;
+        return "updated";
+      });
+
+      const sync = new SecretSync(
+        mockK8sClient as unknown as KubernetesClient,
+        [mockSourceA],
+        createMockConfig(false, { SYNC_WRITE_CONCURRENCY: 2 }) as Config,
+      );
+      await sync.runSync();
+
+      expect(maxInFlight).toBe(2);
+      expect(mockUpsertSecret).toHaveBeenCalledTimes(6);
+    });
+
+    it("should match the measured workload shape", async () => {
+      const uniqueNames = Array.from({ length: 47 }, (_, i) => `secret-${i}`);
+      const requests: NamespaceSyncRequest[] = [];
+      let references = 0;
+      for (let namespaceIndex = 0; namespaceIndex < 13; namespaceIndex++) {
+        const count = namespaceIndex < 2 ? 7 : 6;
+        const secretNames = Array.from(
+          { length: count },
+          (_, offset) => uniqueNames[(namespaceIndex * 4 + offset) % 47],
+        );
+        requests.push({
+          namespace: `ns-${namespaceIndex}`,
+          annotations: [{ provider: "alibaba-kms", secretNames }],
+        });
+        references += count;
+      }
+      expect(references).toBe(80);
+
+      mockGetNamespaceSyncRequests.mockResolvedValue(requests);
+      mockSourceA.fetchSecret.mockImplementation(async (secretName: string) => ({
+        provider: "alibaba-kms",
+        secretName,
+        data: { key: secretName },
+      }));
+
+      const sync = new SecretSync(
+        mockK8sClient as unknown as KubernetesClient,
+        [mockSourceA],
+        createMockConfig() as Config,
+      );
+      await sync.runSync();
+
+      expect(mockSourceA.fetchSecret).toHaveBeenCalledTimes(47);
+      expect(mockUpsertSecret).toHaveBeenCalledTimes(80);
+      const fetched = new Set(
+        mockSourceA.fetchSecret.mock.calls.map((call) => call[0]),
+      );
+      expect(fetched.size).toBe(47);
+      expect(mockSourceA.beginCycle).toHaveBeenCalledTimes(1);
+      expect(
+        (mockSourceA.beginCycle.mock.calls[0][0] as string[]).length,
+      ).toBe(47);
     });
 
     it("should list orphan candidates but delete nothing on dry run", async () => {

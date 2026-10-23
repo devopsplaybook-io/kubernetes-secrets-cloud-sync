@@ -63,11 +63,18 @@ Multiple providers per namespace are supported via multiple annotations. Secret 
 ### Sync Flow
 
 1. `KubernetesClient.getNamespaceSyncRequests()` - lists all namespaces, parses sync annotations
-2. For each namespace, `SecretSync` iterates annotations, calls `source.fetchSecret()` for each secret name
-3. `SecretSync` normalizes every cloud name to a Kubernetes Secret name and detects collisions per namespace (colliding names are skipped, other secrets continue)
-4. `KubernetesClient.upsertSecret()` - GET the Secret, enforce the managed-by ownership guard (or the `cloudsync.devopsplaybook.io/adopt: "true"` annotation), then create or patch (RFC 6902 JSON Patch, 409 retried once, 404 falls back to create)
-5. Managed secrets are labeled with `app.kubernetes.io/managed-by=kubernetes-secrets-cloud-sync` and `cloudsync.devopsplaybook.io/instance=<id>`; the original cloud identifier is stored in the `cloudsync.devopsplaybook.io/source-name` annotation
+2. `SecretSync` pre-collects the union of requested secrets per provider and per-namespace upsert targets; colliding names are skipped (others continue), and each unique `(provider, secret)` is fetched exactly once per cycle
+3. Sources that implement `beginCycle(secretNames)` are called once per cycle with the union of names (Restic resolves its snapshot there); `SecretSync` applies bounded `SYNC_FETCH_CONCURRENCY` for fetching and `SYNC_WRITE_CONCURRENCY` for Kubernetes writes, with per-item error isolation; `endCycle()` always runs in `finally`
+4. `KubernetesClient.upsertSecret()` - GET the Secret, enforce the managed-by ownership guard (or the `cloudsync.devopsplaybook.io/adopt: "true"` annotation), then create or patch (RFC 6902 JSON Patch, 409 retried once, 404 falls back to create). Both the `cloudsync.devopsplaybook.io/data-hash` annotation and the actual data are compared first: unchanged Secrets are not written, metadata-only changes produce a metadata-only patch
+5. Managed secrets are labeled with `app.kubernetes.io/managed-by=kubernetes-secrets-cloud-sync` and `cloudsync.devopsplaybook.io/instance=<id>`; the original cloud identifier is stored in the `cloudsync.devopsplaybook.io/source-name` annotation and the payload hash in `cloudsync.devopsplaybook.io/data-hash`
 6. Orphan cleanup (when enabled) deletes only Secrets of this instance (`managed-by` + `instance` labels) no longer referenced by any annotation, honoring `ORPHAN_CLEANUP_DRY_RUN` and `ORPHAN_CLEANUP_MAX_DELETIONS`
+
+### Startup
+
+`App.main()` installs the cron schedule (node-cron `noOverlap: true`) **before**
+the initial sync, so a stalled initial sync cannot prevent future cycles. A
+`SingleFlightRunner` makes a cron tick share the in-flight run instead of
+starting a second one. In job mode the process runs one cycle and exits.
 
 ### Secret Naming
 
@@ -90,6 +97,13 @@ is a valid label value (<= 63 chars). `src/SecretName.ts` holds the pure helpers
 - AWS `SecretBinary` and Alibaba `secretDataType=binary` are stored base64 under
   the `binary` key; Alibaba KMS calls retry transient errors (3 attempts,
   exponential jitter).
+- Restic resolves one snapshot per cycle (`restic snapshots --json`, newest by
+  time) and streams each file with `restic dump <id> /<path>/<name>.json`; no
+  restore and no temporary plaintext files. Names and `RESTIC_PATH` are
+  validated (letters/digits/`.`, `_`, `-`, `/`; no `..`, empty segments or
+  leading/trailing slash). Invocations are killed with `SIGKILL` after
+  `RESTIC_TIMEOUT_SECONDS` and retried `RESTIC_RETRIES` times on transient
+  failures.
 
 ### Trust Model
 
@@ -116,6 +130,10 @@ Key configuration values:
 - `DELETE_ORPHANED_SECRETS` - enable orphan managed secret cleanup
 - `ORPHAN_CLEANUP_DRY_RUN` - preview orphan deletions without deleting (default: `false`)
 - `ORPHAN_CLEANUP_MAX_DELETIONS` - abort cleanup above this many orphans (default: `50`)
+- `SYNC_FETCH_CONCURRENCY` - max concurrent cloud fetches (default: `4`, clamped 1-32)
+- `SYNC_WRITE_CONCURRENCY` - max concurrent Kubernetes writes (default: `4`, clamped 1-32)
+- `RESTIC_TIMEOUT_SECONDS` - per-invocation restic timeout, SIGKILL (default: `120`)
+- `RESTIC_RETRIES` - transient restic failure retries (default: `2`)
 - Provider-specific: region, credentials for Alibaba KMS / AWS Secrets Manager / Restic
 
 Boolean config values accept `true`, `"true"`, or `"1"` (string or boolean).

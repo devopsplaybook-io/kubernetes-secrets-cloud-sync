@@ -156,7 +156,23 @@ The architecture is designed to be extensible. Additional providers can be added
 
 ### Restic Provider
 
-The restic provider restores the **latest snapshot** of the configured restic repository for every secret fetch, reads the `<secret-name>.json` file from the snapshot (optionally under `RESTIC_PATH`), and cleans up the temporary directory afterward. Each file must contain a flat JSON object whose keys/values become the Kubernetes Secret entries.
+Each sync cycle resolves the **newest snapshot** of the configured restic
+repository once (`restic snapshots --json`), then streams every requested
+`<secret-name>.json` file (optionally under `RESTIC_PATH`) from that snapshot
+with `restic dump`. Every unique secret is fetched once per cycle, all secrets
+of a cycle come from the same snapshot, no full-snapshot restore is performed
+and no plaintext copy is written to disk. Each file must contain a flat JSON
+object whose keys/values become the Kubernetes Secret entries.
+
+Secret names and `RESTIC_PATH` are validated before any restic invocation:
+only letters, digits, `.`, `_`, `-` and `/` are accepted, and leading/trailing
+slashes, empty segments and `..` segments are rejected (they could otherwise
+escape the expected path or turn into glob patterns).
+
+Every restic invocation is bounded by `RESTIC_TIMEOUT_SECONDS` (default `120`)
+and killed with `SIGKILL` when it exceeds it. Transient failures are retried
+`RESTIC_RETRIES` times (default `2`) with exponential backoff; a missing
+`restic` binary and invalid names are not retried.
 
 Example file `feedwatcher.json` inside the restic snapshot:
 
@@ -170,6 +186,27 @@ Example file `feedwatcher.json` inside the restic snapshot:
 With annotation `secrets.cloudsync.devopsplaybook.io/restic: "feedwatcher"`, a Kubernetes Secret named `cloudsync-feedwatcher` is created.
 
 The `restic` CLI must be available on the container `PATH` (included in the provided Docker image). Backend-specific environment variables (e.g. `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` for S3-backed repos) should be provided via the pod environment and will be forwarded to the `restic` process.
+
+### Change detection
+
+Each managed Secret carries a `cloudsync.devopsplaybook.io/data-hash`
+annotation (SHA-256 of the canonical payload, independent of key order). On
+every cycle the controller compares both the hash and the actual Secret data:
+
+- payload and metadata unchanged: no API write at all;
+- only metadata changed (labels/annotations): a metadata-only patch, the
+  `data` field is left untouched;
+- payload changed (even when the stored hash says otherwise): `data` is
+  patched together with the new hash.
+
+Secrets created before this behaviour existed have no `data-hash` annotation:
+the first cycle after the upgrade only patches their metadata, and from the
+second cycle on unchanged Secrets are no longer written.
+
+Fetching and writing are bounded by `SYNC_FETCH_CONCURRENCY` and
+`SYNC_WRITE_CONCURRENCY` (default `4` each), so a cycle no longer runs
+hundreds of cloud calls strictly sequentially.
+
 
 ## Orphan cleanup
 
@@ -203,6 +240,8 @@ Configuration can be set via `config.json` or environment variables:
 | `DELETE_ORPHANED_SECRETS`              | `false`                               | Delete managed secrets no longer annotated   |
 | `ORPHAN_CLEANUP_DRY_RUN`               | `false`                               | Preview orphan deletions without deleting    |
 | `ORPHAN_CLEANUP_MAX_DELETIONS`         | `50`                                  | Abort cleanup above this many orphans        |
+| `SYNC_FETCH_CONCURRENCY`               | `4`                                   | Max concurrent cloud secret fetches (1-32)   |
+| `SYNC_WRITE_CONCURRENCY`               | `4`                                   | Max concurrent Kubernetes Secret writes      |
 | `ALIBABA_KMS_REGION`                   |                                       | Alibaba Cloud region                         |
 | `ALIBABA_KMS_ACCESS_KEY_ID`            |                                       | Alibaba Cloud access key ID                  |
 | `ALIBABA_KMS_ACCESS_KEY_SECRET`        |                                       | Alibaba Cloud access key secret              |
@@ -213,6 +252,8 @@ Configuration can be set via `config.json` or environment variables:
 | `RESTIC_PASSWORD`                      |                                       | Restic repository password                   |
 | `RESTIC_PATH`                          |                                       | Optional sub-folder inside the snapshot      |
 | `RESTIC_OPTIONS`                       |                                       | Extra CLI args appended to every restic call |
+| `RESTIC_TIMEOUT_SECONDS`               | `120`                                 | Per-invocation restic timeout (SIGKILL)      |
+| `RESTIC_RETRIES`                       | `2`                                   | Retries for transient restic failures        |
 | `LOG_LEVEL`                            | `info`                                | Log level                                    |
 | `API_PORT`                             | `8080`                                | HTTP API port                                |
 

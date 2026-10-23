@@ -1,9 +1,11 @@
 import * as k8s from "@kubernetes/client-node";
+import { createHash } from "crypto";
 import { OTelLogger } from "./OTelContext";
 import { Config } from "./Config";
 import { AnnotationEntry, NamespaceSyncRequest } from "./types";
 import {
   ADOPT_ANNOTATION,
+  DATA_HASH_ANNOTATION,
   INSTANCE_LABEL,
   MANAGED_BY_LABEL,
   MANAGED_BY_VALUE,
@@ -21,6 +23,63 @@ export interface ManagedSecret {
   namespace: string;
   name: string;
   sourceName?: string;
+}
+
+/** Outcome of an upsert: whether the API was written to. */
+export type UpsertResult = "created" | "updated" | "unchanged";
+
+/** SHA-256 of the canonical (sorted-key) plaintext payload. */
+export function hashSecretData(data: Record<string, string>): string {
+  const canonical = Object.keys(data)
+    .sort()
+    .map((key) => [key, data[key]]);
+  return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
+}
+
+function mapsEqual(
+  left: Record<string, string> | undefined,
+  right: Record<string, string> | undefined,
+): boolean {
+  const a = left ?? {};
+  const b = right ?? {};
+  const aKeys = Object.keys(a);
+  if (aKeys.length !== Object.keys(b).length) {
+    return false;
+  }
+  return aKeys.every(
+    (key) => Object.prototype.hasOwnProperty.call(b, key) && a[key] === b[key],
+  );
+}
+
+/**
+ * Compare existing Secret data with the base64 payload we would write.
+ * `@kubernetes/client-node` may hand back either base64 strings or Buffers.
+ */
+function secretDataEquals(
+  existingData: Record<string, unknown> | undefined,
+  encodedData: Record<string, string>,
+): boolean {
+  const existing = existingData ?? {};
+  const keys = Object.keys(existing);
+  if (keys.length !== Object.keys(encodedData).length) {
+    return false;
+  }
+  return keys.every((key) => {
+    if (!Object.prototype.hasOwnProperty.call(encodedData, key)) {
+      return false;
+    }
+    const value = existing[key];
+    const asBase64 = Buffer.isBuffer(value)
+      ? value.toString("base64")
+      : String(value);
+    return asBase64 === encodedData[key];
+  });
+}
+
+interface PatchOperation {
+  op: "add";
+  path: string;
+  value: unknown;
 }
 
 /**
@@ -124,12 +183,13 @@ export class KubernetesClient {
     namespace: string,
     secretName: string,
     data: Record<string, string>,
-  ): Promise<void> {
+  ): Promise<UpsertResult> {
     const k8sSecretName = normalizeSecretName(
       secretName,
       this.secretNamePrefix,
     );
     const keyCount = Object.keys(data).length;
+    const hash = hashSecretData(data);
 
     // Encode all values to base64 for Kubernetes secret data field
     const encodedData: Record<string, string> = {};
@@ -142,12 +202,17 @@ export class KubernetesClient {
       try {
         await this.k8sApi.createNamespacedSecret({
           namespace,
-          body: this.buildSecretBody(k8sSecretName, secretName, encodedData),
+          body: this.buildSecretBody(
+            k8sSecretName,
+            secretName,
+            encodedData,
+            hash,
+          ),
         });
         logger.info(
           `Created secret: ${namespace}/${k8sSecretName} (source "${secretName}", ${keyCount} keys)`,
         );
-        return;
+        return "created";
       } catch (error: unknown) {
         if (this.getErrorStatusCode(error) !== 409) {
           throw error;
@@ -157,24 +222,25 @@ export class KubernetesClient {
         if (!raced) {
           throw error;
         }
-        await this.updateExistingSecret(
+        return await this.updateExistingSecret(
           namespace,
           k8sSecretName,
           secretName,
           raced,
           encodedData,
+          hash,
           keyCount,
         );
-        return;
       }
     }
 
-    await this.updateExistingSecret(
+    return await this.updateExistingSecret(
       namespace,
       k8sSecretName,
       secretName,
       existing,
       encodedData,
+      hash,
       keyCount,
     );
   }
@@ -226,6 +292,7 @@ export class KubernetesClient {
     k8sSecretName: string,
     sourceName: string,
     encodedData: Record<string, string>,
+    hash: string,
   ): k8s.V1Secret {
     const labels: Record<string, string> = {
       [MANAGED_BY_LABEL]: MANAGED_BY_VALUE,
@@ -241,7 +308,10 @@ export class KubernetesClient {
       metadata: {
         name: k8sSecretName,
         labels,
-        annotations: { [SOURCE_NAME_ANNOTATION]: sourceName },
+        annotations: {
+          [SOURCE_NAME_ANNOTATION]: sourceName,
+          [DATA_HASH_ANNOTATION]: hash,
+        },
       },
       type: "Opaque",
       data: encodedData,
@@ -254,20 +324,20 @@ export class KubernetesClient {
     sourceName: string,
     existing: k8s.V1Secret,
     encodedData: Record<string, string>,
+    hash: string,
     keyCount: number,
-  ): Promise<void> {
+  ): Promise<UpsertResult> {
     this.assertOwnership(namespace, k8sSecretName, sourceName, existing);
 
     try {
-      await this.patchSecret(
+      return await this.applyPatch(
         namespace,
         k8sSecretName,
         sourceName,
         existing,
         encodedData,
-      );
-      logger.info(
-        `Updated secret: ${namespace}/${k8sSecretName} (source "${sourceName}", ${keyCount} keys)`,
+        hash,
+        keyCount,
       );
     } catch (error: unknown) {
       const statusCode = this.getErrorStatusCode(error);
@@ -275,12 +345,17 @@ export class KubernetesClient {
         // Deleted between GET and PATCH: recreate it.
         await this.k8sApi.createNamespacedSecret({
           namespace,
-          body: this.buildSecretBody(k8sSecretName, sourceName, encodedData),
+          body: this.buildSecretBody(
+            k8sSecretName,
+            sourceName,
+            encodedData,
+            hash,
+          ),
         });
         logger.info(
           `Created secret: ${namespace}/${k8sSecretName} (source "${sourceName}", ${keyCount} keys)`,
         );
-        return;
+        return "created";
       }
       if (statusCode !== 409) {
         throw error;
@@ -291,34 +366,57 @@ export class KubernetesClient {
       if (!fresh) {
         await this.k8sApi.createNamespacedSecret({
           namespace,
-          body: this.buildSecretBody(k8sSecretName, sourceName, encodedData),
+          body: this.buildSecretBody(
+            k8sSecretName,
+            sourceName,
+            encodedData,
+            hash,
+          ),
         });
         logger.info(
           `Created secret: ${namespace}/${k8sSecretName} (source "${sourceName}", ${keyCount} keys)`,
         );
-        return;
+        return "created";
       }
       this.assertOwnership(namespace, k8sSecretName, sourceName, fresh);
-      await this.patchSecret(
+      return await this.applyPatch(
         namespace,
         k8sSecretName,
         sourceName,
         fresh,
         encodedData,
-      );
-      logger.info(
-        `Updated secret: ${namespace}/${k8sSecretName} (source "${sourceName}", ${keyCount} keys)`,
+        hash,
+        keyCount,
       );
     }
   }
 
-  private async patchSecret(
+  private async applyPatch(
     namespace: string,
     k8sSecretName: string,
     sourceName: string,
     existing: k8s.V1Secret,
     encodedData: Record<string, string>,
-  ): Promise<void> {
+    hash: string,
+    keyCount: number,
+  ): Promise<UpsertResult> {
+    const ops = this.buildUpdateOps(existing, sourceName, encodedData, hash);
+    if (ops.length === 0) {
+      return "unchanged";
+    }
+    await this.patchSecret(namespace, k8sSecretName, ops);
+    logger.info(
+      `Updated secret: ${namespace}/${k8sSecretName} (source "${sourceName}", ${keyCount} keys)`,
+    );
+    return "updated";
+  }
+
+  private buildUpdateOps(
+    existing: k8s.V1Secret,
+    sourceName: string,
+    encodedData: Record<string, string>,
+    hash: string,
+  ): PatchOperation[] {
     // RFC 6902 JSON Patch: `add` replaces an existing member, so foreign
     // labels/annotations are preserved while our fields and data are replaced.
     const labels: Record<string, string> = {
@@ -335,14 +433,27 @@ export class KubernetesClient {
     const annotations: Record<string, string> = {
       ...existing.metadata?.annotations,
       [SOURCE_NAME_ANNOTATION]: sourceName,
+      [DATA_HASH_ANNOTATION]: hash,
     };
 
-    const body = [
-      { op: "add", path: "/metadata/labels", value: labels },
-      { op: "add", path: "/metadata/annotations", value: annotations },
-      { op: "add", path: "/data", value: encodedData },
-    ];
+    const ops: PatchOperation[] = [];
+    if (!mapsEqual(existing.metadata?.labels, labels)) {
+      ops.push({ op: "add", path: "/metadata/labels", value: labels });
+    }
+    if (!mapsEqual(existing.metadata?.annotations, annotations)) {
+      ops.push({ op: "add", path: "/metadata/annotations", value: annotations });
+    }
+    if (!secretDataEquals(existing.data, encodedData)) {
+      ops.push({ op: "add", path: "/data", value: encodedData });
+    }
+    return ops;
+  }
 
+  private async patchSecret(
+    namespace: string,
+    k8sSecretName: string,
+    body: PatchOperation[],
+  ): Promise<void> {
     await this.k8sApi.patchNamespacedSecret({
       name: k8sSecretName,
       namespace,

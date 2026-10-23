@@ -34,6 +34,16 @@ export interface SecretSource {
    * @returns true if the source is ready to fetch secrets
    */
   isAvailable(): boolean;
+
+  /**
+   * Optional per-cycle hook called once with every unique secret name the
+   * cycle will request. Sources that benefit from shared setup (e.g. resolving
+   * a snapshot) implement it.
+   */
+  beginCycle?(secretNames: string[]): Promise<void>;
+
+  /** Optional per-cycle cleanup hook, always called after the cycle. */
+  endCycle?(): void | Promise<void>;
 }
 
 /**

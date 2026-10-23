@@ -1,6 +1,6 @@
 import { Config } from "./Config";
-import { KubernetesClient } from "./KubernetesClient";
-import { instanceIdForPrefix } from "./SecretName";
+import { KubernetesClient, hashSecretData } from "./KubernetesClient";
+import { instanceIdForPrefix, isValidLabelValue, normalizeSecretName } from "./SecretName";
 
 // Mock @kubernetes/client-node
 const mockListNamespace = jest.fn();
@@ -55,6 +55,44 @@ function managedSecret(
     },
     type: "Opaque",
     data: {},
+  };
+}
+
+function encodeData(
+  data: Record<string, string>,
+): Record<string, string> {
+  const encoded: Record<string, string> = {};
+  for (const [key, value] of Object.entries(data)) {
+    encoded[key] = Buffer.from(value).toString("base64");
+  }
+  return encoded;
+}
+
+/** A Secret as this controller would leave it after a successful cycle. */
+function convergedSecret(
+  client: KubernetesClient,
+  sourceName: string,
+  data: Record<string, string>,
+): Record<string, any> {
+  const labels: Record<string, string> = {
+    "app.kubernetes.io/managed-by": "kubernetes-secrets-cloud-sync",
+    "cloudsync.devopsplaybook.io/instance": client.instanceId,
+  };
+  if (isValidLabelValue(sourceName)) {
+    labels["cloudsync.devopsplaybook.io/secret-name"] = sourceName;
+  }
+  return {
+    metadata: {
+      name: normalizeSecretName(sourceName, "cloudsync-"),
+      namespace: "default",
+      labels,
+      annotations: {
+        "cloudsync.devopsplaybook.io/source-name": sourceName,
+        "cloudsync.devopsplaybook.io/data-hash": hashSecretData(data),
+      },
+    },
+    type: "Opaque",
+    data: encodeData(data),
   };
 }
 
@@ -230,6 +268,10 @@ describe("KubernetesClient", () => {
             annotations: {
               "cloudsync.devopsplaybook.io/source-name":
                 "prod/my-app/database",
+              "cloudsync.devopsplaybook.io/data-hash": hashSecretData({
+                username: "admin",
+                password: "s3cret",
+              }),
             },
           }),
           type: "Opaque",
@@ -296,6 +338,9 @@ describe("KubernetesClient", () => {
             path: "/metadata/annotations",
             value: {
               "cloudsync.devopsplaybook.io/source-name": "my-secret",
+              "cloudsync.devopsplaybook.io/data-hash": hashSecretData({
+                key: "new-value",
+              }),
               "foreign-annotation": "keep-me-too",
             },
           },
@@ -332,6 +377,140 @@ describe("KubernetesClient", () => {
         "cloudsync.devopsplaybook.io/secret-name",
       );
       expect(labels["foreign-label"]).toBe("keep-me");
+    });
+
+    it("does not patch an unchanged secret and reports it", async () => {
+      mockGetNamespacedSecret.mockResolvedValue(
+        convergedSecret(client, "my-secret", { key: "value", other: "two" }),
+      );
+
+      await expect(
+        client.upsertSecret("default", "my-secret", {
+          other: "two",
+          key: "value",
+        }),
+      ).resolves.toBe("unchanged");
+
+      expect(mockCreateNamespacedSecret).not.toHaveBeenCalled();
+      expect(mockPatchNamespacedSecret).not.toHaveBeenCalled();
+    });
+
+    it("treats existing Buffer data as unchanged", async () => {
+      const converged = convergedSecret(client, "my-secret", {
+        key: "value",
+      });
+      converged.data.key = Buffer.from("value");
+      mockGetNamespacedSecret.mockResolvedValue(converged);
+
+      await expect(
+        client.upsertSecret("default", "my-secret", { key: "value" }),
+      ).resolves.toBe("unchanged");
+      expect(mockPatchNamespacedSecret).not.toHaveBeenCalled();
+    });
+
+    it("converges a stale secret-name label with a metadata-only patch", async () => {
+      const converged = convergedSecret(client, "prod/my-app/database", {
+        key: "value",
+      });
+      converged.metadata.labels["cloudsync.devopsplaybook.io/secret-name"] =
+        "stale";
+      mockGetNamespacedSecret.mockResolvedValue(converged);
+      mockPatchNamespacedSecret.mockResolvedValue({});
+
+      await expect(
+        client.upsertSecret("default", "prod/my-app/database", {
+          key: "value",
+        }),
+      ).resolves.toBe("updated");
+
+      const body = mockPatchNamespacedSecret.mock.calls[0][0].body;
+      expect(body).toHaveLength(1);
+      expect(body[0].path).toBe("/metadata/labels");
+      expect(body[0].value).not.toHaveProperty(
+        "cloudsync.devopsplaybook.io/secret-name",
+      );
+    });
+
+    it("adds the data-hash annotation to a legacy secret without touching data", async () => {
+      const legacy = convergedSecret(client, "my-secret", { key: "value" });
+      delete legacy.metadata.annotations[
+        "cloudsync.devopsplaybook.io/data-hash"
+      ];
+      mockGetNamespacedSecret.mockResolvedValue(legacy);
+      mockPatchNamespacedSecret.mockResolvedValue({});
+
+      await expect(
+        client.upsertSecret("default", "my-secret", { key: "value" }),
+      ).resolves.toBe("updated");
+
+      const body = mockPatchNamespacedSecret.mock.calls[0][0].body;
+      expect(body).toHaveLength(1);
+      expect(body[0].path).toBe("/metadata/annotations");
+      expect(body[0].value["cloudsync.devopsplaybook.io/data-hash"]).toBe(
+        hashSecretData({ key: "value" }),
+      );
+    });
+
+    it("patches data and the hash when the payload changes", async () => {
+      mockGetNamespacedSecret.mockResolvedValue(
+        convergedSecret(client, "my-secret", { key: "old" }),
+      );
+      mockPatchNamespacedSecret.mockResolvedValue({});
+
+      await expect(
+        client.upsertSecret("default", "my-secret", { key: "new" }),
+      ).resolves.toBe("updated");
+
+      const body = mockPatchNamespacedSecret.mock.calls[0][0].body;
+      const paths = body.map((op: { path: string }) => op.path);
+      expect(paths).toContain("/data");
+      expect(paths).toContain("/metadata/annotations");
+      const dataOp = body.find((op: { path: string }) => op.path === "/data");
+      expect(dataOp.value).toEqual(encodeData({ key: "new" }));
+      const annotationsOp = body.find(
+        (op: { path: string }) => op.path === "/metadata/annotations",
+      );
+      expect(
+        annotationsOp.value["cloudsync.devopsplaybook.io/data-hash"],
+      ).toBe(hashSecretData({ key: "new" }));
+    });
+
+    it("patches data when the hash matches but the data was tampered with", async () => {
+      const tampered = convergedSecret(client, "my-secret", { key: "value" });
+      tampered.data.key = Buffer.from("tampered").toString("base64");
+      mockGetNamespacedSecret.mockResolvedValue(tampered);
+      mockPatchNamespacedSecret.mockResolvedValue({});
+
+      await expect(
+        client.upsertSecret("default", "my-secret", { key: "value" }),
+      ).resolves.toBe("updated");
+
+      const body = mockPatchNamespacedSecret.mock.calls[0][0].body;
+      expect(body).toHaveLength(1);
+      expect(body[0].path).toBe("/data");
+      expect(body[0].value).toEqual(encodeData({ key: "value" }));
+    });
+
+    it("returns created or updated according to the write performed", async () => {
+      mockGetNamespacedSecret.mockRejectedValueOnce(NOT_FOUND);
+      mockCreateNamespacedSecret.mockResolvedValue({});
+      await expect(
+        client.upsertSecret("default", "my-secret", { key: "value" }),
+      ).resolves.toBe("created");
+
+      mockGetNamespacedSecret.mockResolvedValue(
+        convergedSecret(client, "my-secret", { key: "value" }),
+      );
+      mockPatchNamespacedSecret.mockResolvedValue({});
+      await expect(
+        client.upsertSecret("default", "my-secret", { key: "changed" }),
+      ).resolves.toBe("updated");
+    });
+
+    it("hashes data independently of key insertion order", () => {
+      expect(hashSecretData({ a: "1", b: "2" })).toBe(
+        hashSecretData({ b: "2", a: "1" }),
+      );
     });
 
     it("refuses to overwrite an unmanaged secret", async () => {
