@@ -5,7 +5,7 @@ import { instanceIdForPrefix, isValidLabelValue, normalizeSecretName } from "./S
 
 // Mock @kubernetes/client-node
 const mockListNamespace = jest.fn();
-const mockGetNamespacedSecret = jest.fn();
+const mockReadNamespacedSecret = jest.fn();
 const mockCreateNamespacedSecret = jest.fn();
 const mockPatchNamespacedSecret = jest.fn();
 const mockListSecretForAllNamespaces = jest.fn();
@@ -19,8 +19,8 @@ jest.mock("@kubernetes/client-node", () => {
     makeApiClient() {
       return {
         listNamespace: (...args: unknown[]) => mockListNamespace(...args),
-        getNamespacedSecret: (...args: unknown[]) =>
-          mockGetNamespacedSecret(...args),
+        readNamespacedSecret: (...args: unknown[]) =>
+          mockReadNamespacedSecret(...args),
         createNamespacedSecret: (...args: unknown[]) =>
           mockCreateNamespacedSecret(...args),
         patchNamespacedSecret: (...args: unknown[]) =>
@@ -121,6 +121,43 @@ function convergedSecret(
     data: encodeData(data),
   };
 }
+
+/**
+ * Regression guard: every CoreV1Api method the controller calls must be
+ * declared by the installed @kubernetes/client-node typings. The 2026-10-24
+ * incident shipped a call to a method that v2 renamed (getNamespacedSecret ->
+ * readNamespacedSecret); the unit mock defined it, so tests passed while every
+ * upsert failed in production. The typings are text-checked because the
+ * package is ESM-only and cannot be require()d inside Jest.
+ */
+describe("KubernetesClient client-method contract", () => {
+  it("only calls CoreV1Api methods declared by @kubernetes/client-node", () => {
+    const { readFileSync } = require("fs");
+    const { dirname, join } = require("path");
+    const packageDir = dirname(
+      require.resolve("@kubernetes/client-node/package.json"),
+    );
+    // The package entry typings re-export the generated API surface; the
+    // CoreV1Api declarations live in the generated API module.
+    const declared = readFileSync(
+      join(packageDir, "dist", "gen", "apis", "CoreV1Api.d.ts"),
+      "utf8",
+    );
+    const source = readFileSync(join(__dirname, "KubernetesClient.ts"), "utf8");
+    const calledMethods = [
+      ...new Set(
+        [...source.matchAll(/this\.k8sApi\.([A-Za-z0-9]+)\(/g)].map(
+          (match) => match[1],
+        ),
+      ),
+    ];
+    expect(calledMethods.length).toBeGreaterThan(0);
+    for (const method of calledMethods) {
+      const isDeclared = declared.includes(`${method}(`);
+      expect(isDeclared).toBe(true);
+    }
+  });
+});
 
 describe("KubernetesClient", () => {
   let config: Config;
@@ -268,7 +305,7 @@ describe("KubernetesClient", () => {
 
   describe("upsertSecret", () => {
     it("creates a normalized secret with source-name annotation and labels", async () => {
-      mockGetNamespacedSecret.mockRejectedValue(NOT_FOUND);
+      mockReadNamespacedSecret.mockRejectedValue(NOT_FOUND);
       mockCreateNamespacedSecret.mockResolvedValue({});
 
       await client.upsertSecret("default", "prod/my-app/database", {
@@ -276,7 +313,7 @@ describe("KubernetesClient", () => {
         password: "s3cret",
       });
 
-      expect(mockGetNamespacedSecret).toHaveBeenCalledWith({
+      expect(mockReadNamespacedSecret).toHaveBeenCalledWith({
         name: "cloudsync-prod-my-app-database",
         namespace: "default",
       });
@@ -310,7 +347,7 @@ describe("KubernetesClient", () => {
     });
 
     it("sets the secret-name label when the source name is a valid label value", async () => {
-      mockGetNamespacedSecret.mockRejectedValue(NOT_FOUND);
+      mockReadNamespacedSecret.mockRejectedValue(NOT_FOUND);
       mockCreateNamespacedSecret.mockResolvedValue({});
 
       await client.upsertSecret("default", "my-secret", { key: "value" });
@@ -329,7 +366,7 @@ describe("KubernetesClient", () => {
     });
 
     it("updates a managed secret with a JSON Patch preserving foreign metadata", async () => {
-      mockGetNamespacedSecret.mockResolvedValue({
+      mockReadNamespacedSecret.mockResolvedValue({
         metadata: {
           name: "cloudsync-my-secret",
           namespace: "default",
@@ -380,7 +417,7 @@ describe("KubernetesClient", () => {
     });
 
     it("removes a stale secret-name label when the source name is not a valid label value", async () => {
-      mockGetNamespacedSecret.mockResolvedValue({
+      mockReadNamespacedSecret.mockResolvedValue({
         metadata: {
           name: "cloudsync-prod-my-app-database",
           namespace: "default",
@@ -406,7 +443,7 @@ describe("KubernetesClient", () => {
     });
 
     it("does not patch an unchanged secret and reports it", async () => {
-      mockGetNamespacedSecret.mockResolvedValue(
+      mockReadNamespacedSecret.mockResolvedValue(
         convergedSecret(client, "my-secret", { key: "value", other: "two" }),
       );
 
@@ -426,7 +463,7 @@ describe("KubernetesClient", () => {
         key: "value",
       });
       converged.data.key = Buffer.from("value");
-      mockGetNamespacedSecret.mockResolvedValue(converged);
+      mockReadNamespacedSecret.mockResolvedValue(converged);
 
       await expect(
         client.upsertSecret("default", "my-secret", { key: "value" }),
@@ -440,7 +477,7 @@ describe("KubernetesClient", () => {
       });
       converged.metadata.labels["cloudsync.devopsplaybook.io/secret-name"] =
         "stale";
-      mockGetNamespacedSecret.mockResolvedValue(converged);
+      mockReadNamespacedSecret.mockResolvedValue(converged);
       mockPatchNamespacedSecret.mockResolvedValue({});
 
       await expect(
@@ -462,7 +499,7 @@ describe("KubernetesClient", () => {
       delete legacy.metadata.annotations[
         "cloudsync.devopsplaybook.io/data-hash"
       ];
-      mockGetNamespacedSecret.mockResolvedValue(legacy);
+      mockReadNamespacedSecret.mockResolvedValue(legacy);
       mockPatchNamespacedSecret.mockResolvedValue({});
 
       await expect(
@@ -478,7 +515,7 @@ describe("KubernetesClient", () => {
     });
 
     it("patches data and the hash when the payload changes", async () => {
-      mockGetNamespacedSecret.mockResolvedValue(
+      mockReadNamespacedSecret.mockResolvedValue(
         convergedSecret(client, "my-secret", { key: "old" }),
       );
       mockPatchNamespacedSecret.mockResolvedValue({});
@@ -504,7 +541,7 @@ describe("KubernetesClient", () => {
     it("patches data when the hash matches but the data was tampered with", async () => {
       const tampered = convergedSecret(client, "my-secret", { key: "value" });
       tampered.data.key = Buffer.from("tampered").toString("base64");
-      mockGetNamespacedSecret.mockResolvedValue(tampered);
+      mockReadNamespacedSecret.mockResolvedValue(tampered);
       mockPatchNamespacedSecret.mockResolvedValue({});
 
       await expect(
@@ -518,13 +555,13 @@ describe("KubernetesClient", () => {
     });
 
     it("returns created or updated according to the write performed", async () => {
-      mockGetNamespacedSecret.mockRejectedValueOnce(NOT_FOUND);
+      mockReadNamespacedSecret.mockRejectedValueOnce(NOT_FOUND);
       mockCreateNamespacedSecret.mockResolvedValue({});
       await expect(
         client.upsertSecret("default", "my-secret", { key: "value" }),
       ).resolves.toBe("created");
 
-      mockGetNamespacedSecret.mockResolvedValue(
+      mockReadNamespacedSecret.mockResolvedValue(
         convergedSecret(client, "my-secret", { key: "value" }),
       );
       mockPatchNamespacedSecret.mockResolvedValue({});
@@ -540,7 +577,7 @@ describe("KubernetesClient", () => {
     });
 
     it("refuses to overwrite an unmanaged secret", async () => {
-      mockGetNamespacedSecret.mockResolvedValue({
+      mockReadNamespacedSecret.mockResolvedValue({
         metadata: {
           name: "cloudsync-my-secret",
           namespace: "default",
@@ -560,7 +597,7 @@ describe("KubernetesClient", () => {
     });
 
     it("adopts a secret carrying the adoption annotation", async () => {
-      mockGetNamespacedSecret.mockResolvedValue({
+      mockReadNamespacedSecret.mockResolvedValue({
         metadata: {
           name: "cloudsync-my-secret",
           namespace: "default",
@@ -580,7 +617,7 @@ describe("KubernetesClient", () => {
     });
 
     it("re-reads and patches when a concurrent create returns 409", async () => {
-      mockGetNamespacedSecret
+      mockReadNamespacedSecret
         .mockRejectedValueOnce(NOT_FOUND)
         .mockResolvedValueOnce(managedSecret());
       mockCreateNamespacedSecret.mockRejectedValueOnce(CONFLICT);
@@ -588,13 +625,13 @@ describe("KubernetesClient", () => {
 
       await client.upsertSecret("default", "my-secret", { key: "value" });
 
-      expect(mockGetNamespacedSecret).toHaveBeenCalledTimes(2);
+      expect(mockReadNamespacedSecret).toHaveBeenCalledTimes(2);
       expect(mockCreateNamespacedSecret).toHaveBeenCalledTimes(1);
       expect(mockPatchNamespacedSecret).toHaveBeenCalledTimes(1);
     });
 
     it("retries a conflicting patch once with fresh metadata", async () => {
-      mockGetNamespacedSecret.mockResolvedValue(managedSecret());
+      mockReadNamespacedSecret.mockResolvedValue(managedSecret());
       mockPatchNamespacedSecret
         .mockRejectedValueOnce(CONFLICT)
         .mockResolvedValueOnce({});
@@ -605,7 +642,7 @@ describe("KubernetesClient", () => {
     });
 
     it("throws when the patch keeps conflicting", async () => {
-      mockGetNamespacedSecret.mockResolvedValue(managedSecret());
+      mockReadNamespacedSecret.mockResolvedValue(managedSecret());
       mockPatchNamespacedSecret.mockRejectedValue(CONFLICT);
 
       await expect(
@@ -615,7 +652,7 @@ describe("KubernetesClient", () => {
     });
 
     it("recreates the secret when the patch returns 404", async () => {
-      mockGetNamespacedSecret.mockResolvedValue(managedSecret());
+      mockReadNamespacedSecret.mockResolvedValue(managedSecret());
       mockPatchNamespacedSecret.mockRejectedValue(NOT_FOUND);
       mockCreateNamespacedSecret.mockResolvedValue({});
 
@@ -630,7 +667,7 @@ describe("KubernetesClient", () => {
     });
 
     it("propagates non-404 errors from the initial GET", async () => {
-      mockGetNamespacedSecret.mockRejectedValue(
+      mockReadNamespacedSecret.mockRejectedValue(
         Object.assign(new Error("Forbidden"), { code: 403 }),
       );
 
@@ -642,7 +679,7 @@ describe("KubernetesClient", () => {
     });
 
     it("treats a Kubernetes ApiException 404 as not found", async () => {
-      mockGetNamespacedSecret.mockRejectedValue(
+      mockReadNamespacedSecret.mockRejectedValue(
         new ApiException(404, "Not Found", {}, {}),
       );
       mockCreateNamespacedSecret.mockResolvedValue({});
@@ -838,7 +875,7 @@ describe("KubernetesClient", () => {
     });
 
     it("emits child spans for secret get and create", async () => {
-      mockGetNamespacedSecret.mockRejectedValue(NOT_FOUND);
+      mockReadNamespacedSecret.mockRejectedValue(NOT_FOUND);
       mockCreateNamespacedSecret.mockResolvedValue({});
 
       await client.upsertSecret("default", "my-secret", { key: "value" });
