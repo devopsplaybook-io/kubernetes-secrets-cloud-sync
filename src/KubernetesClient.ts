@@ -576,7 +576,10 @@ export class KubernetesClient {
       parentSpan,
     );
     try {
-      const secret = await this.k8sApi.getNamespacedSecret({ name, namespace });
+      const secret = await this.k8sApi.readNamespacedSecret({
+        name,
+        namespace,
+      });
       OTelEndSpan(span);
       return secret;
     } catch (error: unknown) {
