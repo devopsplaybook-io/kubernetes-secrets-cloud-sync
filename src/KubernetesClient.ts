@@ -1,5 +1,5 @@
 import * as k8s from "@kubernetes/client-node";
-import { Span } from "@opentelemetry/sdk-trace-base";
+import type { Span } from "@opentelemetry/api";
 import { createHash } from "crypto";
 import { OTelEndSpan, OTelLogger, OTelStartSpan } from "./OTelContext";
 import { Config } from "./Config";

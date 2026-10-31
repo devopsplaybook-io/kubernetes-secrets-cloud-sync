@@ -1,6 +1,6 @@
 {
   "name": "kubernetes-secrets-cloud-sync",
-  "version": "0.11.1",
+  "version": "0.11.2",
   "author": "",
   "license": "MIT",
   "engines": {
@@ -16,27 +16,26 @@
     "dev:test": "NODE_ENV=dev jest --watch --config='jest.config.js'"
   },
   "dependencies": {
-    "@alicloud/kms20160120": "^3.3.0",
+    "@alicloud/kms20160120": "^3.3.1",
     "@alicloud/openapi-client": "^0.4.15",
     "@alicloud/tea-util": "^1.4.11",
-    "@aws-sdk/client-secrets-manager": "^3.1152.0",
-    "@devopsplaybook.io/otel-utils": "^1.5.1",
-    "@devopsplaybook.io/otel-utils-fastify": "^1.4.1",
-    "@kubernetes/client-node": "^2.0.0",
-    "@opentelemetry/api": "^1.9.1",
-    "@opentelemetry/sdk-trace-base": "^2.12.0",
+    "@aws-sdk/client-secrets-manager": "^3.1161.0",
+    "@devopsplaybook.io/otel-utils": "^1.9.1",
+    "@devopsplaybook.io/otel-utils-fastify": "^1.7.1",
+    "@kubernetes/client-node": "^2.0.1",
+    "@opentelemetry/api": "^1.10.0",
     "fastify": "^5.12.7",
     "fs-extra": "^11.4.1",
     "node-cron": "^4.6.0"
   },
   "devDependencies": {
-    "@swc/core": "^1.16.18",
+    "@swc/core": "^1.16.21",
     "@swc/jest": "^0.2.39",
     "@types/fs-extra": "^11.0.4",
     "@types/jest": "^30.0.0",
-    "@types/node": "^26.6.5",
+    "@types/node": "^26.6.6",
     "jest": "^30.5.2",
-    "oxlint": "^1.88.0",
+    "oxlint": "^1.90.0",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
   }
