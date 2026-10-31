@@ -2,8 +2,11 @@ import {
   StandardLogger,
   StandardTracer,
 } from "@devopsplaybook.io/otel-utils";
-import { SpanKind, SpanStatusCode } from "@opentelemetry/api";
-import { Span } from "@opentelemetry/sdk-trace-base";
+import {
+  Span,
+  SpanKind,
+  SpanStatusCode,
+} from "@opentelemetry/api";
 
 let tracer: StandardTracer | undefined;
 let logger: StandardLogger;

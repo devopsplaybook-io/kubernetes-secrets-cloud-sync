@@ -1,6 +1,6 @@
 import { Config } from "./Config";
 import { mapWithConcurrency } from "./Concurrency";
-import { Span } from "@opentelemetry/sdk-trace-base";
+import type { Span } from "@opentelemetry/api";
 import { SecretSource } from "./sources/SecretSource";
 import { KubernetesClient, ManagedSecret } from "./KubernetesClient";
 import { OTelEndSpan, OTelLogger, OTelStartSpan, toError } from "./OTelContext";
