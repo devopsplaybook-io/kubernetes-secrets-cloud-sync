@@ -9,4 +9,7 @@ coverage
 /docs/dev/env.sh
 .vscode
 /env-dev.js
+.env
+.env.*
+*.env
 /dist

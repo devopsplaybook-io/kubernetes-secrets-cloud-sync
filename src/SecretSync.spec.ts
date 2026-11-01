@@ -54,6 +54,7 @@ describe("SecretSync", () => {
     ORPHAN_CLEANUP_MAX_DELETIONS: 50,
     SYNC_FETCH_CONCURRENCY: 4,
     SYNC_WRITE_CONCURRENCY: 4,
+    SYNC_MAX_SECRETS_PER_ANNOTATION: 100,
     ...overrides,
   });
 
@@ -992,6 +993,112 @@ describe("SecretSync", () => {
       } finally {
         logSpy.mockRestore();
       }
+    });
+
+    describe("per-annotation secret cap", () => {
+      const annotationFor = (secretNames: string[]) => [
+        {
+          namespace: "default",
+          annotations: [{ provider: "alibaba-kms", secretNames }],
+        },
+      ];
+
+      it("skips an over-limit annotation with a clear error", async () => {
+        const logs: string[] = [];
+        const logSpy = jest
+          .spyOn(console, "error")
+          .mockImplementation((...args: unknown[]) => {
+            logs.push(args.map(String).join(" "));
+          });
+        try {
+          mockGetNamespaceSyncRequests.mockResolvedValue(
+            annotationFor(["a", "b", "c"]),
+          );
+
+          const sync = new SecretSync(
+            mockK8sClient as unknown as KubernetesClient,
+            [mockSourceA],
+            createMockConfig(false, {
+              SYNC_MAX_SECRETS_PER_ANNOTATION: 2,
+            }) as Config,
+          );
+          const result = await sync.runSync();
+
+          expect(mockSourceA.fetchSecret).not.toHaveBeenCalled();
+          expect(mockUpsertSecret).not.toHaveBeenCalled();
+          expect(result.errors).toBe(1);
+          expect(result.failedNamespaces).toEqual(["default"]);
+          expect(
+            logs.some(
+              (line) =>
+                line.includes("SYNC_MAX_SECRETS_PER_ANNOTATION=2") &&
+                line.includes("3 secret(s)"),
+            ),
+          ).toBe(true);
+        } finally {
+          logSpy.mockRestore();
+        }
+      });
+
+      it("syncs an annotation exactly at the limit", async () => {
+        mockGetNamespaceSyncRequests.mockResolvedValue(
+          annotationFor(["a", "b"]),
+        );
+        mockSourceA.fetchSecret.mockImplementation(
+          async (secretName: string) => ({
+            provider: "alibaba-kms",
+            secretName,
+            data: { key: "value" },
+          }),
+        );
+
+        const sync = new SecretSync(
+          mockK8sClient as unknown as KubernetesClient,
+          [mockSourceA],
+          createMockConfig(false, {
+            SYNC_MAX_SECRETS_PER_ANNOTATION: 2,
+          }) as Config,
+        );
+        const result = await sync.runSync();
+
+        expect(mockSourceA.fetchSecret).toHaveBeenCalledTimes(2);
+        expect(mockUpsertSecret).toHaveBeenCalledTimes(2);
+        expect(result.errors).toBe(0);
+      });
+
+      it("falls back to the default limit for invalid values", async () => {
+        const secretNames = Array.from({ length: 101 }, (_, i) => `s${i}`);
+        const logs: string[] = [];
+        const logSpy = jest
+          .spyOn(console, "error")
+          .mockImplementation((...args: unknown[]) => {
+            logs.push(args.map(String).join(" "));
+          });
+        try {
+          mockGetNamespaceSyncRequests.mockResolvedValue(
+            annotationFor(secretNames),
+          );
+
+          const sync = new SecretSync(
+            mockK8sClient as unknown as KubernetesClient,
+            [mockSourceA],
+            createMockConfig(false, {
+              SYNC_MAX_SECRETS_PER_ANNOTATION: 0,
+            }) as Config,
+          );
+          const result = await sync.runSync();
+
+          expect(mockSourceA.fetchSecret).not.toHaveBeenCalled();
+          expect(result.errors).toBe(1);
+          expect(
+            logs.some((line) =>
+              line.includes("SYNC_MAX_SECRETS_PER_ANNOTATION=100"),
+            ),
+          ).toBe(true);
+        } finally {
+          logSpy.mockRestore();
+        }
+      });
     });
   });
 

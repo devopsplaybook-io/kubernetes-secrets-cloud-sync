@@ -12,6 +12,8 @@ const logger = OTelLogger().createModuleLogger("secret-sync");
 const DEFAULT_MAX_ORPHAN_DELETIONS = 50;
 const DEFAULT_CONCURRENCY = 4;
 const DEFAULT_CYCLE_TIMEOUT_SECONDS = 300;
+const DEFAULT_MAX_SECRET_NAMES_PER_ANNOTATION = 100;
+const MAX_SECRET_NAMES_PER_ANNOTATION_LIMIT = 1000;
 const PREVIEW_LIMIT = 20;
 
 /** Raised when SYNC_CYCLE_TIMEOUT_SECONDS expires while a cycle is running. */
@@ -177,6 +179,16 @@ export class SecretSync {
             errors++;
             logger.error(
               `Secret provider unavailable: ${annotation.provider} (namespace: ${request.namespace}); check its configuration, annotation skipped`,
+            );
+            continue;
+          }
+
+          const maxSecretNames = this.getMaxSecretNamesPerAnnotation();
+          if (annotation.secretNames.length > maxSecretNames) {
+            failedNamespaces.add(request.namespace);
+            errors++;
+            logger.error(
+              `Annotation requests ${annotation.secretNames.length} secret(s) for provider ${annotation.provider} in namespace ${request.namespace}, above SYNC_MAX_SECRETS_PER_ANNOTATION=${maxSecretNames}; annotation skipped`,
             );
             continue;
           }
@@ -556,6 +568,14 @@ export class SecretSync {
       return DEFAULT_CONCURRENCY;
     }
     return Math.floor(parsed);
+  }
+
+  private getMaxSecretNamesPerAnnotation(): number {
+    const parsed = Number(this.config.SYNC_MAX_SECRETS_PER_ANNOTATION);
+    if (!Number.isFinite(parsed) || parsed < 1) {
+      return DEFAULT_MAX_SECRET_NAMES_PER_ANNOTATION;
+    }
+    return Math.min(Math.floor(parsed), MAX_SECRET_NAMES_PER_ANNOTATION_LIMIT);
   }
 
   private parseMaxDeletions(value: number | string | undefined): number {

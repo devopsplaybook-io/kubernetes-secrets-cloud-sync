@@ -30,6 +30,7 @@ jest.mock("./Api", () => {
   return {
     SyncStatus: jest.fn(() => statusInstance),
     createApiServer: jest.fn(() => server),
+    assertSafeApiBinding: jest.fn(),
     __statusInstance: statusInstance,
     __apiServer: server,
   };
@@ -73,7 +74,8 @@ jest.mock("./Config", () => {
     JOB_MODE: false,
     SYNC_ALLOWED_PARTIAL_FAILURES: 0,
     API_PORT: 8080,
-    API_HOST: "0.0.0.0",
+    API_HOST: "127.0.0.1",
+    API_AUTH_TOKEN: "",
     LOG_LEVEL: "info",
     ANNOTATION_PREFIX: "secrets.cloudsync.devopsplaybook.io",
     SECRET_NAME_PREFIX: "cloudsync-",
@@ -173,6 +175,7 @@ const {
   __statusInstance: statusInstance,
   __apiServer: apiServer,
   createApiServer: mockCreateApiServer,
+  assertSafeApiBinding: mockAssertSafeApiBinding,
 } = jest.requireMock("./Api") as {
   __statusInstance: {
     markRunStarted: jest.Mock;
@@ -183,6 +186,7 @@ const {
   };
   __apiServer: { listen: jest.Mock; close: jest.Mock };
   createApiServer: jest.Mock;
+  assertSafeApiBinding: jest.Mock;
 };
 
 function syncResult(overrides: Partial<SyncRunResult> = {}): SyncRunResult {
@@ -274,10 +278,12 @@ describe("App main", () => {
     configInstance.JOB_MODE = false;
     configInstance.SYNC_ALLOWED_PARTIAL_FAILURES = 0;
     configInstance.API_PORT = 8080;
-    configInstance.API_HOST = "0.0.0.0";
+    configInstance.API_HOST = "127.0.0.1";
+    configInstance.API_AUTH_TOKEN = "";
     configInstance.LOG_LEVEL = "info";
     configInstance.ANNOTATION_PREFIX = "secrets.cloudsync.devopsplaybook.io";
     configInstance.reload.mockResolvedValue(undefined);
+    mockAssertSafeApiBinding.mockReset();
     secretSyncInstance.runSync.mockReset();
     secretSyncInstance.runSync.mockResolvedValue(syncResult());
     mockValidate.mockReturnValue(true);
@@ -320,8 +326,18 @@ describe("App main", () => {
     expect(options.logger).toBe(standardLogger);
     expect(apiServer.listen).toHaveBeenCalledWith({
       port: 8080,
-      host: "0.0.0.0",
+      host: "127.0.0.1",
     });
+    expect(mockAssertSafeApiBinding).toHaveBeenCalledWith(configInstance);
+    expect(mockAssertSafeApiBinding.mock.invocationCallOrder[0]).toBeLessThan(
+      mockCreateApiServer.mock.invocationCallOrder[0],
+    );
+    expect(mockAssertSafeApiBinding.mock.invocationCallOrder[0]).toBeLessThan(
+      apiServer.listen.mock.invocationCallOrder[0],
+    );
+    expect(mockAssertSafeApiBinding.mock.invocationCallOrder[0]).toBeLessThan(
+      secretSyncInstance.runSync.mock.invocationCallOrder[0],
+    );
     expect(apiServer.listen.mock.invocationCallOrder[0]).toBeLessThan(
       mockSchedule.mock.invocationCallOrder[0],
     );
@@ -364,6 +380,18 @@ describe("App main", () => {
     expect(secretSyncInstance.runSync).not.toHaveBeenCalled();
     expect(mockCreateApiServer).not.toHaveBeenCalled();
     expect(apiServer.listen).not.toHaveBeenCalled();
+  });
+
+  it("fails startup when the API binding is unsafe", async () => {
+    mockAssertSafeApiBinding.mockImplementationOnce(() => {
+      throw new Error("unsafe bind");
+    });
+
+    await expect(main()).rejects.toThrow(/unsafe bind/);
+
+    expect(mockCreateApiServer).not.toHaveBeenCalled();
+    expect(apiServer.listen).not.toHaveBeenCalled();
+    expect(secretSyncInstance.runSync).not.toHaveBeenCalled();
   });
 
   it("logs a failed source init and still starts the cron and initial sync", async () => {
@@ -495,6 +523,17 @@ describe("App main", () => {
         expect.any(Error),
       );
     });
+
+    it("does not assert the API binding in job mode", async () => {
+      secretSyncInstance.runSync.mockResolvedValue(
+        syncResult({ namespaces: 1, secrets: 2, succeededSecrets: 2 }),
+      );
+      mockExit();
+
+      await main();
+
+      expect(mockAssertSafeApiBinding).not.toHaveBeenCalled();
+    });
   });
 
   describe("config watcher and reload", () => {
@@ -590,6 +629,7 @@ describe("App main", () => {
     it("warns about restart-only settings without logging their values", async () => {
       await main();
       configInstance.ANNOTATION_PREFIX = "new-prefix-value";
+      configInstance.API_AUTH_TOKEN = "new-token-value";
       const listener = mockWatchFile.mock.calls[0][2] as () => void;
 
       jest.useFakeTimers();
@@ -604,6 +644,12 @@ describe("App main", () => {
       );
       expect(warning).toBeDefined();
       expect(String(warning![0])).not.toContain("new-prefix-value");
+
+      const tokenWarning = appLogger.warn.mock.calls.find((call) =>
+        String(call[0]).includes("API_AUTH_TOKEN"),
+      );
+      expect(tokenWarning).toBeDefined();
+      expect(String(tokenWarning![0])).not.toContain("new-token-value");
     });
   });
 

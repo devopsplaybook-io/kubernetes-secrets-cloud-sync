@@ -9,6 +9,23 @@ jest.mock("fs-extra", () => ({
   readJson: (...args: unknown[]) => mockReadJson(...args),
 }));
 
+function captureConsole() {
+  const lines: string[] = [];
+  const record = (...args: unknown[]) => {
+    lines.push(args.map((arg) => String(arg)).join(" "));
+  };
+  const spies = [
+    jest.spyOn(console, "log").mockImplementation(record),
+    jest.spyOn(console, "warn").mockImplementation(record),
+    jest.spyOn(console, "error").mockImplementation(record),
+  ];
+  return {
+    lines,
+    text: () => lines.join("\n"),
+    restore: () => spies.forEach((spy) => spy.mockRestore()),
+  };
+}
+
 describe("Config", () => {
   const OLD_ENV = process.env;
 
@@ -32,13 +49,17 @@ describe("Config", () => {
     delete process.env.SYNC_ALLOWED_PARTIAL_FAILURES;
     delete process.env.RESTIC_REPOSITORY;
     delete process.env.RESTIC_PASSWORD;
+    delete process.env.RESTIC_OPTIONS;
     delete process.env.RESTIC_HOST;
     delete process.env.RESTIC_TAG;
     delete process.env.RESTIC_SNAPSHOT_PATH;
     delete process.env.RESTIC_MAX_SNAPSHOT_AGE_SECONDS;
     delete process.env.RESTIC_MAX_OUTPUT_BYTES;
+    delete process.env.SYNC_MAX_SECRETS_PER_ANNOTATION;
     delete process.env.API_PORT;
     delete process.env.API_HOST;
+    delete process.env.API_AUTH_TOKEN;
+    delete process.env.API_SYNC_MIN_INTERVAL_SECONDS;
   });
 
   afterEach(() => {
@@ -84,8 +105,11 @@ describe("Config", () => {
       expect(config.SYNC_FETCH_CONCURRENCY).toBe(4);
       expect(config.SYNC_WRITE_CONCURRENCY).toBe(4);
       expect(config.SYNC_ALLOWED_PARTIAL_FAILURES).toBe(0);
+      expect(config.SYNC_MAX_SECRETS_PER_ANNOTATION).toBe(100);
       expect(config.API_PORT).toBe(8080);
-      expect(config.API_HOST).toBe("0.0.0.0");
+      expect(config.API_HOST).toBe("127.0.0.1");
+      expect(config.API_AUTH_TOKEN).toBe("");
+      expect(config.API_SYNC_MIN_INTERVAL_SECONDS).toBe(10);
     });
   });
 
@@ -156,19 +180,58 @@ describe("Config", () => {
       expect(config.SYNC_CRON_SCHEDULE).toBe("*/5 * * * *");
     });
 
-    it("should not log secret values in plain text", async () => {
-      // This is a behavioral test - secrets should be logged as asterisks
-      // We just verify it doesn't crash and uses the config value internally
+    it("never logs configured secret values in plain text", async () => {
+      const secrets = {
+        alibabaKeyId: "alibaba-key-id-PLACEHOLDER",
+        alibabaKeySecret: "alibaba-key-secret-PLACEHOLDER",
+        awsKeyId: "aws-key-id-PLACEHOLDER",
+        awsSecret: "aws-secret-access-PLACEHOLDER",
+        resticUser: "restic-user-PLACEHOLDER",
+        resticUserPass: "restic-user-pass-PLACEHOLDER",
+        resticPassword: "restic-password-PLACEHOLDER",
+        resticOptionSecret: "option-password-PLACEHOLDER",
+        apiToken: "api-token-PLACEHOLDER",
+        configToken: "config-token-PLACEHOLDER",
+      };
+      process.env.API_AUTH_TOKEN = secrets.apiToken;
       mockReadJson.mockResolvedValue({
-        ALIBABA_KMS_ACCESS_KEY_ID: "my-key-id",
-        AWS_SECRETSMANAGER_SECRET_ACCESS_KEY: "my-secret-key",
+        ALIBABA_KMS_ACCESS_KEY_ID: secrets.alibabaKeyId,
+        ALIBABA_KMS_ACCESS_KEY_SECRET: secrets.alibabaKeySecret,
+        AWS_SECRETSMANAGER_ACCESS_KEY_ID: secrets.awsKeyId,
+        AWS_SECRETSMANAGER_SECRET_ACCESS_KEY: secrets.awsSecret,
+        RESTIC_REPOSITORY: `s3:https://${secrets.resticUser}:${secrets.resticUserPass}@example.com/repo`,
+        RESTIC_PASSWORD: secrets.resticPassword,
+        RESTIC_OPTIONS: `--sftp.password=${secrets.resticOptionSecret}`,
+        API_AUTH_TOKEN: secrets.configToken,
       });
 
-      const config = new Config();
-      await config.reload();
+      const capture = captureConsole();
+      let config: Config;
+      try {
+        config = new Config();
+        await config.reload();
+      } finally {
+        capture.restore();
+      }
 
-      expect(config.ALIBABA_KMS_ACCESS_KEY_ID).toBe("my-key-id");
-      expect(config.AWS_SECRETSMANAGER_SECRET_ACCESS_KEY).toBe("my-secret-key");
+      const output = capture.text();
+      for (const secret of Object.values(secrets)) {
+        expect(output).not.toContain(secret);
+      }
+      expect(output).toContain("RESTIC_REPOSITORY: ********************");
+      expect(output).toContain("RESTIC_PASSWORD: ********************");
+      expect(output).toContain("RESTIC_OPTIONS: ********************");
+      expect(output).toContain(
+        "API_AUTH_TOKEN: ******************** (from environment)",
+      );
+      expect(output).toContain(
+        "API_AUTH_TOKEN must be set from the environment; the config.json value is ignored",
+      );
+      // The token is read from the environment only, never from config.json.
+      expect(config!.API_AUTH_TOKEN).toBe(secrets.apiToken);
+      expect(config!.RESTIC_OPTIONS).toBe(
+        `--sftp.password=${secrets.resticOptionSecret}`,
+      );
     });
 
     it("should handle string boolean values for DELETE_ORPHANED_SECRETS", async () => {
@@ -377,7 +440,7 @@ describe("Config", () => {
       const config = new Config();
       await config.reload();
       expect(config.API_PORT).toBe(8080);
-      expect(config.API_HOST).toBe("0.0.0.0");
+      expect(config.API_HOST).toBe("127.0.0.1");
     });
 
     it("should clamp API_PORT above the maximum port", async () => {
@@ -389,28 +452,102 @@ describe("Config", () => {
       expect(config.API_PORT).toBe(65535);
     });
 
+    it("reads API_AUTH_TOKEN from the environment only", async () => {
+      const capture = captureConsole();
+      process.env.API_AUTH_TOKEN = "env-token-PLACEHOLDER";
+      mockReadJson.mockResolvedValue({
+        API_AUTH_TOKEN: "config-token-PLACEHOLDER",
+      });
+
+      let config: Config;
+      try {
+        config = new Config();
+        await config.reload();
+      } finally {
+        capture.restore();
+      }
+
+      expect(config!.API_AUTH_TOKEN).toBe("env-token-PLACEHOLDER");
+      expect(capture.text()).not.toContain("env-token-PLACEHOLDER");
+      expect(capture.text()).not.toContain("config-token-PLACEHOLDER");
+    });
+
+    it("logs that API_AUTH_TOKEN is not set when empty", async () => {
+      const capture = captureConsole();
+      try {
+        const config = new Config();
+        await config.reload();
+        expect(config.API_AUTH_TOKEN).toBe("");
+      } finally {
+        capture.restore();
+      }
+
+      expect(capture.text()).toContain("API_AUTH_TOKEN: (not set)");
+    });
+
+    it("bounds API_SYNC_MIN_INTERVAL_SECONDS", async () => {
+      mockReadJson.mockResolvedValue({ API_SYNC_MIN_INTERVAL_SECONDS: 0 });
+      const config = new Config();
+      await config.reload();
+      expect(config.API_SYNC_MIN_INTERVAL_SECONDS).toBe(0);
+
+      process.env.API_SYNC_MIN_INTERVAL_SECONDS = "9999";
+      await config.reload();
+      expect(config.API_SYNC_MIN_INTERVAL_SECONDS).toBe(3600);
+
+      process.env.API_SYNC_MIN_INTERVAL_SECONDS = "-1";
+      await config.reload();
+      expect(config.API_SYNC_MIN_INTERVAL_SECONDS).toBe(10);
+
+      mockReadJson.mockResolvedValue({ API_SYNC_MIN_INTERVAL_SECONDS: 5 });
+      process.env.API_SYNC_MIN_INTERVAL_SECONDS = "30";
+      await config.reload();
+      expect(config.API_SYNC_MIN_INTERVAL_SECONDS).toBe(30);
+    });
+
+    it("bounds SYNC_MAX_SECRETS_PER_ANNOTATION", async () => {
+      mockReadJson.mockResolvedValue({ SYNC_MAX_SECRETS_PER_ANNOTATION: 500 });
+      const config = new Config();
+      await config.reload();
+      expect(config.SYNC_MAX_SECRETS_PER_ANNOTATION).toBe(500);
+
+      process.env.SYNC_MAX_SECRETS_PER_ANNOTATION = "5000";
+      await config.reload();
+      expect(config.SYNC_MAX_SECRETS_PER_ANNOTATION).toBe(1000);
+
+      process.env.SYNC_MAX_SECRETS_PER_ANNOTATION = "0";
+      await config.reload();
+      expect(config.SYNC_MAX_SECRETS_PER_ANNOTATION).toBe(100);
+
+      process.env.SYNC_MAX_SECRETS_PER_ANNOTATION = "garbage";
+      await config.reload();
+      expect(config.SYNC_MAX_SECRETS_PER_ANNOTATION).toBe(100);
+    });
+
     it("should mask RESTIC_REPOSITORY in the configuration log", async () => {
-      const logSpy = jest
-        .spyOn(console, "log")
-        .mockImplementation(() => undefined);
+      const capture = captureConsole();
       mockReadJson.mockResolvedValue({
         RESTIC_REPOSITORY: "s3:https://user:secret@example.com/repo",
       });
 
-      const config = new Config();
-      await config.reload();
+      try {
+        const config = new Config();
+        await config.reload();
 
-      expect(config.RESTIC_REPOSITORY).toBe(
-        "s3:https://user:secret@example.com/repo",
-      );
-      const logs = logSpy.mock.calls.map((call) => call.join(" "));
+        expect(config.RESTIC_REPOSITORY).toBe(
+          "s3:https://user:secret@example.com/repo",
+        );
+      } finally {
+        capture.restore();
+      }
+
+      const logs = capture.lines;
       expect(
         logs.some((line) =>
           line.includes("RESTIC_REPOSITORY: ********************"),
         ),
       ).toBe(true);
       expect(logs.some((line) => line.includes("user:secret"))).toBe(false);
-      logSpy.mockRestore();
     });
   });
 });
