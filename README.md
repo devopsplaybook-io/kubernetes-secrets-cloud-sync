@@ -118,7 +118,14 @@ metadata:
 
 On adoption, and on every later update, labels and annotations not owned by the
 controller are preserved, while the `data` section is replaced by the cloud
-payload (stale keys are removed).
+payload (stale keys are removed). Updates are JSON Patch operations guarded by a
+`resourceVersion` test, so a concurrent writer is detected (the controller
+re-reads and retries once) instead of being silently overwritten.
+
+Ownership includes the instance label: a Secret managed by another controller
+instance (different `ANNOTATION_PREFIX`) is refused unless it carries the same
+adoption annotation. Secrets written before instance tracking existed (no
+`instance` label) stay owned and get the label backfilled on their next write.
 
 ### Payload validation and binary secrets
 
@@ -212,6 +219,36 @@ Fetching and writing are bounded by `SYNC_FETCH_CONCURRENCY` and
 `SYNC_WRITE_CONCURRENCY` (default `4` each), so a cycle no longer runs
 hundreds of cloud calls strictly sequentially.
 
+### Sync cycle deadline and retries
+
+`SYNC_CYCLE_TIMEOUT_SECONDS` (default `300`) bounds a whole cycle. When it
+expires, the controller aborts the in-flight provider calls and Kubernetes
+requests, stops scheduling more work, skips orphan cleanup, and reports the run
+as failed (`deadlineExceeded`) so job mode exits non-zero.
+
+Individual Kubernetes requests are bounded by `K8S_REQUEST_TIMEOUT_MS` (default
+`30000`). Idempotent calls (GET, PATCH, DELETE) retry up to
+`K8S_RETRY_MAX_ATTEMPTS` (default `3`) on `429` and `5xx` responses and on
+transient network errors, using exponential backoff with jitter and honoring a
+`Retry-After` header (capped at 30s). Creates are never retried, so a
+partially-applied write is not duplicated. `409` conflicts keep their own
+re-read-and-retry-once path, separate from the transient retry policy.
+
+AWS Secrets Manager uses the SDK's `NodeHttpHandler` with
+`AWS_SECRETSMANAGER_CONNECT_TIMEOUT_MS` (default `10000`) and
+`AWS_SECRETSMANAGER_REQUEST_TIMEOUT_MS` (default `30000`). Alibaba KMS and
+Restic already enforce their own per-call timeouts and retries.
+
+A provider that is annotated but not registered, or registered but not
+available (missing credentials), is treated as a configuration failure: the
+annotation is skipped, the namespace is marked failed, and the occurrence is
+counted in `errors`, so the job exits non-zero and `/api/status` reports
+`partial` (or `failure`). This is distinct from a secret that the provider
+reports as not found, which is logged as a per-secret error.
+
+On `SIGTERM`/`SIGINT` the service waits up to `SHUTDOWN_GRACE_PERIOD_SECONDS`
+(default `15`) for the in-flight cycle before exiting.
+
 
 ## Orphan cleanup
 
@@ -228,7 +265,8 @@ Safety controls:
 
 - `ORPHAN_CLEANUP_DRY_RUN=true` logs the candidates and deletes nothing.
 - `ORPHAN_CLEANUP_MAX_DELETIONS` (default `50`): when more orphans than this
-  are found, nothing is deleted and an error is logged.
+  are found, nothing is deleted, an error is logged, and the run is marked with
+  `cleanupAborted` so job mode and `/api/status` do not report success.
 - A preview of the candidates (up to 20, plus a count of the rest) is logged
   before any deletion.
 
@@ -248,6 +286,12 @@ Configuration can be set via `config.json` or environment variables:
 | `SYNC_FETCH_CONCURRENCY`               | `4`                                   | Max concurrent cloud secret fetches (1-32)   |
 | `SYNC_WRITE_CONCURRENCY`               | `4`                                   | Max concurrent Kubernetes Secret writes      |
 | `SYNC_ALLOWED_PARTIAL_FAILURES`        | `0`                                   | Job-mode error budget (0-10000)              |
+| `SYNC_CYCLE_TIMEOUT_SECONDS`           | `300`                                 | Whole-cycle deadline (1-7200)                |
+| `SHUTDOWN_GRACE_PERIOD_SECONDS`        | `15`                                  | Max wait for an in-flight cycle on shutdown  |
+| `K8S_REQUEST_TIMEOUT_MS`               | `30000`                               | Per-request Kubernetes timeout               |
+| `K8S_RETRY_MAX_ATTEMPTS`               | `3`                                   | Attempts for idempotent Kubernetes calls     |
+| `AWS_SECRETSMANAGER_CONNECT_TIMEOUT_MS`| `10000`                               | AWS SDK connect timeout                      |
+| `AWS_SECRETSMANAGER_REQUEST_TIMEOUT_MS`| `30000`                               | AWS SDK request timeout                      |
 | `ALIBABA_KMS_REGION`                   |                                       | Alibaba Cloud region                         |
 | `ALIBABA_KMS_ACCESS_KEY_ID`            |                                       | Alibaba Cloud access key ID                  |
 | `ALIBABA_KMS_ACCESS_KEY_SECRET`        |                                       | Alibaba Cloud access key secret              |
@@ -277,12 +321,14 @@ Applied on the next cycle without a restart:
 - `DELETE_ORPHANED_SECRETS`, `ORPHAN_CLEANUP_DRY_RUN`,
   `ORPHAN_CLEANUP_MAX_DELETIONS`;
 - `SYNC_FETCH_CONCURRENCY`, `SYNC_WRITE_CONCURRENCY`,
-  `SYNC_ALLOWED_PARTIAL_FAILURES`;
+  `SYNC_ALLOWED_PARTIAL_FAILURES`, `SYNC_CYCLE_TIMEOUT_SECONDS`,
+  `SHUTDOWN_GRACE_PERIOD_SECONDS`;
 - `RESTIC_REPOSITORY`, `RESTIC_PASSWORD`, `RESTIC_PATH`, `RESTIC_OPTIONS`,
   `RESTIC_TIMEOUT_SECONDS`, `RESTIC_RETRIES`.
 
 Restart-only settings (`JOB_MODE`, `ANNOTATION_PREFIX`, `SECRET_NAME_PREFIX`,
-`API_HOST`, `API_PORT`, cloud regions and credentials, `LOG_LEVEL` and all
+`API_HOST`, `API_PORT`, `K8S_REQUEST_TIMEOUT_MS`, `K8S_RETRY_MAX_ATTEMPTS`,
+cloud regions, credentials and HTTP timeouts, `LOG_LEVEL` and all
 `OPENTELEMETRY_*` keys) are read once at startup. When a reload changes one of
 them, the service logs a warning naming the key and asking for a restart;
 values are never logged.
@@ -299,8 +345,11 @@ schedule.
 following is true, and `0` otherwise:
 
 - listing namespaces failed (the run never got a work list);
+- the cycle deadline (`SYNC_CYCLE_TIMEOUT_SECONDS`) was exceeded
+  (`deadlineExceeded`);
 - `errors > SYNC_ALLOWED_PARTIAL_FAILURES` (default `0`, i.e. any error fails
-  the job);
+  the job); unavailable/unknown providers, aborted orphan cleanup above the
+  deletion threshold, and per-secret failures all count as errors;
 - secrets were requested but none could be fetched (`secrets > 0 &&
   succeededSecrets === 0`).
 

@@ -22,6 +22,10 @@ function syncResult(overrides: Partial<SyncRunResult> = {}): SyncRunResult {
     errors: 0,
     failedNamespaces: [],
     namespaceListSucceeded: true,
+    unknownProviders: [],
+    unavailableProviders: [],
+    cleanupAborted: false,
+    deadlineExceeded: false,
     durationMs: 5,
     ...overrides,
   };
@@ -169,6 +173,16 @@ describe("createApiServer", () => {
 
     status.markRunSucceeded(
       syncResult({ namespaces: 0, namespaceListSucceeded: false }),
+    );
+
+    expect((await getStatus()).json().sync.lastOutcome).toBe("failure");
+  });
+
+  it("derives a failure when the cycle deadline was exceeded", async () => {
+    const { status } = build();
+
+    status.markRunSucceeded(
+      syncResult({ secrets: 2, succeededSecrets: 1, deadlineExceeded: true }),
     );
 
     expect((await getStatus()).json().sync.lastOutcome).toBe("failure");

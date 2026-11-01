@@ -313,11 +313,11 @@ describe("KubernetesClient", () => {
         password: "s3cret",
       });
 
-      expect(mockReadNamespacedSecret).toHaveBeenCalledWith({
+      expect(mockReadNamespacedSecret.mock.calls[0][0]).toEqual({
         name: "cloudsync-prod-my-app-database",
         namespace: "default",
       });
-      expect(mockCreateNamespacedSecret).toHaveBeenCalledWith({
+      expect(mockCreateNamespacedSecret.mock.calls[0][0]).toEqual({
         namespace: "default",
         body: expect.objectContaining({
           apiVersion: "v1",
@@ -352,7 +352,7 @@ describe("KubernetesClient", () => {
 
       await client.upsertSecret("default", "my-secret", { key: "value" });
 
-      expect(mockCreateNamespacedSecret).toHaveBeenCalledWith({
+      expect(mockCreateNamespacedSecret.mock.calls[0][0]).toEqual({
         namespace: "default",
         body: expect.objectContaining({
           metadata: expect.objectContaining({
@@ -381,38 +381,33 @@ describe("KubernetesClient", () => {
       await client.upsertSecret("default", "my-secret", { key: "new-value" });
 
       expect(mockCreateNamespacedSecret).not.toHaveBeenCalled();
-      expect(mockPatchNamespacedSecret).toHaveBeenCalledWith({
-        name: "cloudsync-my-secret",
-        namespace: "default",
-        fieldManager: "kubernetes-secrets-cloud-sync",
-        body: [
-          {
-            op: "add",
-            path: "/metadata/labels",
-            value: {
-              "app.kubernetes.io/managed-by": "kubernetes-secrets-cloud-sync",
-              "cloudsync.devopsplaybook.io/instance": client.instanceId,
-              "cloudsync.devopsplaybook.io/secret-name": "my-secret",
-              "foreign-label": "keep-me",
-            },
-          },
-          {
-            op: "add",
-            path: "/metadata/annotations",
-            value: {
-              "cloudsync.devopsplaybook.io/source-name": "my-secret",
-              "cloudsync.devopsplaybook.io/data-hash": hashSecretData({
-                key: "new-value",
-              }),
-              "foreign-annotation": "keep-me-too",
-            },
-          },
-          {
-            op: "add",
-            path: "/data",
-            value: { key: Buffer.from("new-value").toString("base64") },
-          },
-        ],
+      const body = mockPatchNamespacedSecret.mock.calls[0][0].body as Array<{
+        op: string;
+        path: string;
+        value: any;
+      }>;
+      const paths = body.map((op) => op.path);
+      // Only our own keys are touched; foreign metadata is never in the patch.
+      expect(paths).toEqual(
+        expect.arrayContaining([
+          "/metadata/labels/cloudsync.devopsplaybook.io~1instance",
+          "/metadata/labels/cloudsync.devopsplaybook.io~1secret-name",
+          "/metadata/annotations/cloudsync.devopsplaybook.io~1source-name",
+          "/metadata/annotations/cloudsync.devopsplaybook.io~1data-hash",
+          "/data",
+        ]),
+      );
+      expect(JSON.stringify(body)).not.toContain("foreign-label");
+      expect(JSON.stringify(body)).not.toContain("foreign-annotation");
+      expect(
+        body.find(
+          (op) =>
+            op.path ===
+            "/metadata/labels/cloudsync.devopsplaybook.io~1secret-name",
+        )?.value,
+      ).toBe("my-secret");
+      expect(body.find((op) => op.path === "/data")?.value).toEqual({
+        key: Buffer.from("new-value").toString("base64"),
       });
     });
 
@@ -435,11 +430,16 @@ describe("KubernetesClient", () => {
         key: "value",
       });
 
-      const labels = mockPatchNamespacedSecret.mock.calls[0][0].body[0].value;
-      expect(labels).not.toHaveProperty(
-        "cloudsync.devopsplaybook.io/secret-name",
-      );
-      expect(labels["foreign-label"]).toBe("keep-me");
+      const body = mockPatchNamespacedSecret.mock.calls[0][0].body as Array<{
+        op: string;
+        path: string;
+        value?: unknown;
+      }>;
+      expect(body).toContainEqual({
+        op: "remove",
+        path: "/metadata/labels/cloudsync.devopsplaybook.io~1secret-name",
+      });
+      expect(JSON.stringify(body)).not.toContain("foreign-label");
     });
 
     it("does not patch an unchanged secret and reports it", async () => {
@@ -486,12 +486,17 @@ describe("KubernetesClient", () => {
         }),
       ).resolves.toBe("updated");
 
-      const body = mockPatchNamespacedSecret.mock.calls[0][0].body;
-      expect(body).toHaveLength(1);
-      expect(body[0].path).toBe("/metadata/labels");
-      expect(body[0].value).not.toHaveProperty(
-        "cloudsync.devopsplaybook.io/secret-name",
-      );
+      const body = mockPatchNamespacedSecret.mock.calls[0][0].body as Array<{
+        op: string;
+        path: string;
+        value?: unknown;
+      }>;
+      expect(body).toEqual([
+        {
+          op: "remove",
+          path: "/metadata/labels/cloudsync.devopsplaybook.io~1secret-name",
+        },
+      ]);
     });
 
     it("adds the data-hash annotation to a legacy secret without touching data", async () => {
@@ -506,12 +511,16 @@ describe("KubernetesClient", () => {
         client.upsertSecret("default", "my-secret", { key: "value" }),
       ).resolves.toBe("updated");
 
-      const body = mockPatchNamespacedSecret.mock.calls[0][0].body;
+      const body = mockPatchNamespacedSecret.mock.calls[0][0].body as Array<{
+        op: string;
+        path: string;
+        value?: Record<string, string>;
+      }>;
       expect(body).toHaveLength(1);
-      expect(body[0].path).toBe("/metadata/annotations");
-      expect(body[0].value["cloudsync.devopsplaybook.io/data-hash"]).toBe(
-        hashSecretData({ key: "value" }),
+      expect(body[0].path).toBe(
+        "/metadata/annotations/cloudsync.devopsplaybook.io~1data-hash",
       );
+      expect(body[0].value).toBe(hashSecretData({ key: "value" }));
     });
 
     it("patches data and the hash when the payload changes", async () => {
@@ -524,18 +533,24 @@ describe("KubernetesClient", () => {
         client.upsertSecret("default", "my-secret", { key: "new" }),
       ).resolves.toBe("updated");
 
-      const body = mockPatchNamespacedSecret.mock.calls[0][0].body;
-      const paths = body.map((op: { path: string }) => op.path);
+      const body = mockPatchNamespacedSecret.mock.calls[0][0].body as Array<{
+        op: string;
+        path: string;
+        value?: any;
+      }>;
+      const paths = body.map((op) => op.path);
       expect(paths).toContain("/data");
-      expect(paths).toContain("/metadata/annotations");
-      const dataOp = body.find((op: { path: string }) => op.path === "/data");
-      expect(dataOp.value).toEqual(encodeData({ key: "new" }));
-      const annotationsOp = body.find(
-        (op: { path: string }) => op.path === "/metadata/annotations",
+      expect(paths).toContain(
+        "/metadata/annotations/cloudsync.devopsplaybook.io~1data-hash",
       );
-      expect(
-        annotationsOp.value["cloudsync.devopsplaybook.io/data-hash"],
-      ).toBe(hashSecretData({ key: "new" }));
+      const dataOp = body.find((op) => op.path === "/data");
+      expect(dataOp?.value).toEqual(encodeData({ key: "new" }));
+      const hashOp = body.find(
+        (op) =>
+          op.path ===
+          "/metadata/annotations/cloudsync.devopsplaybook.io~1data-hash",
+      );
+      expect(hashOp?.value).toBe(hashSecretData({ key: "new" }));
     });
 
     it("patches data when the hash matches but the data was tampered with", async () => {
@@ -610,10 +625,108 @@ describe("KubernetesClient", () => {
       await client.upsertSecret("default", "my-secret", { key: "value" });
 
       expect(mockPatchNamespacedSecret).toHaveBeenCalledTimes(1);
-      const labels = mockPatchNamespacedSecret.mock.calls[0][0].body[0].value;
-      expect(labels["app.kubernetes.io/managed-by"]).toBe(
-        "kubernetes-secrets-cloud-sync",
+      const body = mockPatchNamespacedSecret.mock.calls[0][0].body as Array<{
+        op: string;
+        path: string;
+        value?: unknown;
+      }>;
+      expect(
+        body.find(
+          (op) =>
+            op.path ===
+            "/metadata/labels/app.kubernetes.io~1managed-by",
+        )?.value,
+      ).toBe("kubernetes-secrets-cloud-sync");
+      expect(body).toContainEqual({
+        op: "remove",
+        path: "/metadata/annotations/cloudsync.devopsplaybook.io~1adopt",
+      });
+    });
+
+    it("refuses a Secret managed by a different instance without adoption", async () => {
+      mockReadNamespacedSecret.mockResolvedValue(
+        managedSecret({
+          labels: {
+            "cloudsync.devopsplaybook.io/instance": "another-instance",
+          },
+        }),
       );
+
+      await expect(
+        client.upsertSecret("default", "my-secret", { key: "value" }),
+      ).rejects.toThrow(
+        'managed by another instance of kubernetes-secrets-cloud-sync (instance "another-instance"',
+      );
+      expect(mockPatchNamespacedSecret).not.toHaveBeenCalled();
+    });
+
+    it("adopts a Secret managed by a different instance carrying the adoption annotation", async () => {
+      mockReadNamespacedSecret.mockResolvedValue(
+        managedSecret({
+          labels: {
+            "cloudsync.devopsplaybook.io/instance": "another-instance",
+          },
+          annotations: { "cloudsync.devopsplaybook.io/adopt": "true" },
+        }),
+      );
+      mockPatchNamespacedSecret.mockResolvedValue({});
+
+      await expect(
+        client.upsertSecret("default", "my-secret", { key: "value" }),
+      ).resolves.toBe("updated");
+
+      const body = mockPatchNamespacedSecret.mock.calls[0][0].body as Array<{
+        op: string;
+        path: string;
+        value?: unknown;
+      }>;
+      expect(
+        body.find(
+          (op) =>
+            op.path ===
+            "/metadata/labels/cloudsync.devopsplaybook.io~1instance",
+        )?.value,
+      ).toBe(client.instanceId);
+    });
+
+    it("backfills the instance label on legacy Secrets", async () => {
+      mockReadNamespacedSecret.mockResolvedValue(managedSecret());
+      mockPatchNamespacedSecret.mockResolvedValue({});
+
+      await client.upsertSecret("default", "my-secret", { key: "value" });
+
+      const body = mockPatchNamespacedSecret.mock.calls[0][0].body as Array<{
+        op: string;
+        path: string;
+        value?: unknown;
+      }>;
+      expect(
+        body.find(
+          (op) =>
+            op.path ===
+            "/metadata/labels/cloudsync.devopsplaybook.io~1instance",
+        )?.value,
+      ).toBe(client.instanceId);
+    });
+
+    it("guards the patch with a resourceVersion test", async () => {
+      const converged = convergedSecret(client, "my-secret", { key: "old" });
+      converged.metadata.resourceVersion = "42";
+      mockReadNamespacedSecret.mockResolvedValue(converged);
+      mockPatchNamespacedSecret.mockResolvedValue({});
+
+      await client.upsertSecret("default", "my-secret", { key: "new" });
+
+      const body = mockPatchNamespacedSecret.mock.calls[0][0].body as Array<{
+        op: string;
+        path: string;
+        value?: unknown;
+      }>;
+      expect(body[0]).toEqual({
+        op: "test",
+        path: "/metadata/resourceVersion",
+        value: "42",
+      });
     });
 
     it("re-reads and patches when a concurrent create returns 409", async () => {
@@ -658,7 +771,7 @@ describe("KubernetesClient", () => {
 
       await client.upsertSecret("default", "my-secret", { key: "value" });
 
-      expect(mockCreateNamespacedSecret).toHaveBeenCalledWith({
+      expect(mockCreateNamespacedSecret.mock.calls[0][0]).toEqual({
         namespace: "default",
         body: expect.objectContaining({
           metadata: expect.objectContaining({ name: "cloudsync-my-secret" }),
@@ -686,7 +799,7 @@ describe("KubernetesClient", () => {
 
       await client.upsertSecret("default", "my-secret", { key: "value" });
 
-      expect(mockCreateNamespacedSecret).toHaveBeenCalledWith({
+      expect(mockCreateNamespacedSecret.mock.calls[0][0]).toEqual({
         namespace: "default",
         body: expect.objectContaining({
           metadata: expect.objectContaining({ name: "cloudsync-my-secret" }),
@@ -701,7 +814,7 @@ describe("KubernetesClient", () => {
 
       await client.listManagedSecrets();
 
-      expect(mockListSecretForAllNamespaces).toHaveBeenCalledWith({
+      expect(mockListSecretForAllNamespaces.mock.calls[0][0]).toEqual({
         labelSelector: `app.kubernetes.io/managed-by=kubernetes-secrets-cloud-sync,cloudsync.devopsplaybook.io/instance=${instanceIdForPrefix(config.ANNOTATION_PREFIX)}`,
       });
     });
@@ -767,7 +880,7 @@ describe("KubernetesClient", () => {
 
       await client.deleteSecret("default", "cloudsync-old-secret");
 
-      expect(mockDeleteNamespacedSecret).toHaveBeenCalledWith({
+      expect(mockDeleteNamespacedSecret.mock.calls[0][0]).toEqual({
         namespace: "default",
         name: "cloudsync-old-secret",
       });
@@ -789,6 +902,130 @@ describe("KubernetesClient", () => {
       await expect(
         client.deleteSecret("default", "no-permission"),
       ).rejects.toThrow("Forbidden");
+    });
+  });
+
+  describe("retries, timeouts and abort", () => {
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    it("retries a 429 response honoring Retry-After", async () => {
+      jest.useFakeTimers();
+      config.K8S_RETRY_MAX_ATTEMPTS = 3;
+      client = new KubernetesClient(config);
+      mockReadNamespacedSecret
+        .mockRejectedValueOnce(
+          Object.assign(new Error("Too Many Requests"), {
+            code: 429,
+            headers: { "retry-after": "0" },
+          }),
+        )
+        .mockRejectedValueOnce(NOT_FOUND);
+      mockCreateNamespacedSecret.mockResolvedValue({});
+
+      const promise = client.upsertSecret("default", "my-secret", {
+        key: "value",
+      });
+      await jest.advanceTimersByTimeAsync(1);
+      await expect(promise).resolves.toBe("created");
+      expect(mockReadNamespacedSecret).toHaveBeenCalledTimes(2);
+    });
+
+    it("retries 5xx and gives up after K8S_RETRY_MAX_ATTEMPTS", async () => {
+      jest.useFakeTimers();
+      config.K8S_RETRY_MAX_ATTEMPTS = 3;
+      client = new KubernetesClient(config);
+      mockReadNamespacedSecret.mockRejectedValue(
+        Object.assign(new Error("Service Unavailable"), { code: 503 }),
+      );
+
+      const promise = client.upsertSecret("default", "my-secret", {
+        key: "value",
+      });
+      const assertion = expect(promise).rejects.toThrow("Service Unavailable");
+      await jest.advanceTimersByTimeAsync(10_000);
+      await assertion;
+      expect(mockReadNamespacedSecret).toHaveBeenCalledTimes(3);
+    });
+
+    it("does not retry 4xx responses", async () => {
+      mockReadNamespacedSecret.mockRejectedValue(
+        Object.assign(new Error("Forbidden"), { code: 403 }),
+      );
+
+      await expect(
+        client.upsertSecret("default", "my-secret", { key: "value" }),
+      ).rejects.toThrow("Forbidden");
+      expect(mockReadNamespacedSecret).toHaveBeenCalledTimes(1);
+    });
+
+    it("never retries a create", async () => {
+      jest.useFakeTimers();
+      config.K8S_RETRY_MAX_ATTEMPTS = 3;
+      client = new KubernetesClient(config);
+      mockReadNamespacedSecret.mockRejectedValue(NOT_FOUND);
+      mockCreateNamespacedSecret.mockRejectedValue(
+        Object.assign(new Error("Service Unavailable"), { code: 503 }),
+      );
+
+      await expect(
+        client.upsertSecret("default", "my-secret", { key: "value" }),
+      ).rejects.toThrow("Service Unavailable");
+      expect(mockCreateNamespacedSecret).toHaveBeenCalledTimes(1);
+    });
+
+    it("times out a hung Kubernetes request", async () => {
+      jest.useFakeTimers();
+      config.K8S_REQUEST_TIMEOUT_MS = 1_000;
+      config.K8S_RETRY_MAX_ATTEMPTS = 1;
+      client = new KubernetesClient(config);
+      mockReadNamespacedSecret.mockReturnValue(new Promise(() => {}));
+
+      const promise = client.upsertSecret("default", "my-secret", {
+        key: "value",
+      });
+      const assertion = expect(promise).rejects.toThrow(
+        "Kubernetes read secret timed out after 1000ms",
+      );
+      await jest.advanceTimersByTimeAsync(1_000);
+      await assertion;
+      expect(mockReadNamespacedSecret).toHaveBeenCalledTimes(1);
+    });
+
+    it("retries once after a request timeout", async () => {
+      jest.useFakeTimers();
+      config.K8S_REQUEST_TIMEOUT_MS = 1_000;
+      config.K8S_RETRY_MAX_ATTEMPTS = 2;
+      client = new KubernetesClient(config);
+      mockReadNamespacedSecret
+        .mockReturnValueOnce(new Promise(() => {}))
+        .mockRejectedValueOnce(NOT_FOUND);
+      mockCreateNamespacedSecret.mockResolvedValue({});
+
+      const promise = client.upsertSecret("default", "my-secret", {
+        key: "value",
+      });
+      await jest.advanceTimersByTimeAsync(5_000);
+      await expect(promise).resolves.toBe("created");
+      expect(mockReadNamespacedSecret).toHaveBeenCalledTimes(2);
+    });
+
+    it("aborts in-flight requests when the cycle signal aborts", async () => {
+      mockReadNamespacedSecret.mockReturnValue(new Promise(() => {}));
+      const controller = new AbortController();
+
+      const promise = client.upsertSecret(
+        "default",
+        "my-secret",
+        { key: "value" },
+        undefined,
+        controller.signal,
+      );
+      controller.abort(new Error("sync cycle deadline"));
+
+      await expect(promise).rejects.toThrow("sync cycle deadline");
+      expect(mockReadNamespacedSecret).toHaveBeenCalledTimes(1);
     });
   });
 

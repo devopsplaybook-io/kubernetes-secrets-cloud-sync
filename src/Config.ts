@@ -54,6 +54,12 @@ export class Config implements ConfigOTelInterface {
   public SYNC_FETCH_CONCURRENCY = 4;
   public SYNC_WRITE_CONCURRENCY = 4;
   public SYNC_ALLOWED_PARTIAL_FAILURES = 0;
+  public SYNC_CYCLE_TIMEOUT_SECONDS = 300;
+  public SHUTDOWN_GRACE_PERIOD_SECONDS = 15;
+
+  // Kubernetes client configuration
+  public K8S_REQUEST_TIMEOUT_MS = 30000;
+  public K8S_RETRY_MAX_ATTEMPTS = 3;
 
   // HTTP API configuration
   public API_PORT = 8080;
@@ -68,6 +74,8 @@ export class Config implements ConfigOTelInterface {
   public AWS_SECRETSMANAGER_REGION = "";
   public AWS_SECRETSMANAGER_ACCESS_KEY_ID = "";
   public AWS_SECRETSMANAGER_SECRET_ACCESS_KEY = "";
+  public AWS_SECRETSMANAGER_CONNECT_TIMEOUT_MS = 10000;
+  public AWS_SECRETSMANAGER_REQUEST_TIMEOUT_MS = 30000;
 
   // Restic configuration
   public RESTIC_REPOSITORY = "";
@@ -157,6 +165,10 @@ export class Config implements ConfigOTelInterface {
     setBoundedIntIfSet("SYNC_FETCH_CONCURRENCY", 4, 1, 32);
     setBoundedIntIfSet("SYNC_WRITE_CONCURRENCY", 4, 1, 32);
     setBoundedIntIfSet("SYNC_ALLOWED_PARTIAL_FAILURES", 0, 0, 10000);
+    setBoundedIntIfSet("SYNC_CYCLE_TIMEOUT_SECONDS", 300, 1, 7200);
+    setBoundedIntIfSet("SHUTDOWN_GRACE_PERIOD_SECONDS", 15, 1, 300);
+    setBoundedIntIfSet("K8S_REQUEST_TIMEOUT_MS", 30000, 1000, 600000);
+    setBoundedIntIfSet("K8S_RETRY_MAX_ATTEMPTS", 3, 1, 10);
 
     // HTTP API configuration
     setBoundedIntIfSet("API_PORT", 8080, 1, 65535);
@@ -176,6 +188,18 @@ export class Config implements ConfigOTelInterface {
     setIfSet("AWS_SECRETSMANAGER_REGION");
     setIfSet("AWS_SECRETSMANAGER_ACCESS_KEY_ID", false);
     setIfSet("AWS_SECRETSMANAGER_SECRET_ACCESS_KEY", false);
+    setBoundedIntIfSet(
+      "AWS_SECRETSMANAGER_CONNECT_TIMEOUT_MS",
+      10000,
+      1000,
+      600000,
+    );
+    setBoundedIntIfSet(
+      "AWS_SECRETSMANAGER_REQUEST_TIMEOUT_MS",
+      30000,
+      1000,
+      600000,
+    );
 
     // Restic configuration
     setIfSet("RESTIC_REPOSITORY", false);

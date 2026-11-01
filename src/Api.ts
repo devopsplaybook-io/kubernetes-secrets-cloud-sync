@@ -39,6 +39,9 @@ export interface CreateApiServerOptions {
 }
 
 function outcomeOf(result: SyncRunResult): SyncOutcome {
+  if (result.deadlineExceeded) {
+    return "failure";
+  }
   if (!result.namespaceListSucceeded) {
     return "failure";
   }

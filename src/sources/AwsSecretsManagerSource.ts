@@ -3,7 +3,8 @@ import {
   SecretsManagerClient,
   SecretsManagerClientConfig,
 } from "@aws-sdk/client-secrets-manager";
-import { BaseSecretSource } from "./SecretSource";
+import { NodeHttpHandler } from "@smithy/node-http-handler";
+import { BaseSecretSource, SecretFetchOptions } from "./SecretSource";
 import { Config } from "../Config";
 import { OTelLogger } from "../OTelContext";
 import { SecretFetchResult } from "../types";
@@ -46,6 +47,10 @@ export class AwsSecretsManagerSource extends BaseSecretSource {
 
     const clientConfig: SecretsManagerClientConfig = {
       region: this.config.AWS_SECRETSMANAGER_REGION,
+      requestHandler: new NodeHttpHandler({
+        connectionTimeout: this.config.AWS_SECRETSMANAGER_CONNECT_TIMEOUT_MS,
+        requestTimeout: this.config.AWS_SECRETSMANAGER_REQUEST_TIMEOUT_MS,
+      }),
     };
 
     if (
@@ -68,14 +73,19 @@ export class AwsSecretsManagerSource extends BaseSecretSource {
     this.client = new SecretsManagerClient(clientConfig);
   }
 
-  async fetchSecret(secretName: string): Promise<SecretFetchResult> {
+  async fetchSecret(
+    secretName: string,
+    options?: SecretFetchOptions,
+  ): Promise<SecretFetchResult> {
     if (!this.client) {
       throw new Error("AWS Secrets Manager client not initialized");
     }
+    options?.signal?.throwIfAborted();
 
     logger.info(`Fetching secret: ${secretName}`);
     const response = await this.client.send(
       new GetSecretValueCommand({ SecretId: secretName }),
+      { abortSignal: options?.signal },
     );
 
     let raw: Record<string, unknown>;

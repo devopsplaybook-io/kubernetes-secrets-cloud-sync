@@ -1,5 +1,5 @@
 import { spawn } from "child_process";
-import { BaseSecretSource } from "./SecretSource";
+import { BaseSecretSource, SecretFetchOptions } from "./SecretSource";
 import { Config } from "../Config";
 import { OTelLogger, toError } from "../OTelContext";
 import { maskUrlUserinfo, sanitizeResticOutput } from "../Redaction";
@@ -65,12 +65,19 @@ export class ResticSource extends BaseSecretSource {
    * and re-thrown per secret by `fetchSecret`, so a broken repository does not
    * spawn one restic process per requested secret.
    */
-  async beginCycle(secretNames: string[]): Promise<void> {
+  async beginCycle(
+    secretNames: string[],
+    options?: SecretFetchOptions,
+  ): Promise<void> {
     this.snapshotId = undefined;
     this.cycleError = undefined;
+    options?.signal?.throwIfAborted();
 
     try {
-      const stdout = await this.runRestic(["snapshots", "--json"]);
+      const stdout = await this.runRestic(
+        ["snapshots", "--json"],
+        options?.signal,
+      );
       let snapshots: unknown;
       try {
         snapshots = JSON.parse(stdout);
@@ -126,10 +133,14 @@ export class ResticSource extends BaseSecretSource {
     this.cycleError = undefined;
   }
 
-  async fetchSecret(secretName: string): Promise<SecretFetchResult> {
+  async fetchSecret(
+    secretName: string,
+    options?: SecretFetchOptions,
+  ): Promise<SecretFetchResult> {
     if (!this.isAvailable()) {
       throw new Error("Restic source not configured");
     }
+    options?.signal?.throwIfAborted();
     if (this.cycleError) {
       throw this.cycleError;
     }
@@ -147,11 +158,10 @@ export class ResticSource extends BaseSecretSource {
       `Fetching secret ${secretName} from restic snapshot ${this.snapshotId ?? "latest"} (dump: ${includePattern})`,
     );
 
-    const stdout = await this.runRestic([
-      "dump",
-      this.snapshotId ?? "latest",
-      includePattern,
-    ]);
+    const stdout = await this.runRestic(
+      ["dump", this.snapshotId ?? "latest", includePattern],
+      options?.signal,
+    );
 
     let parsed: unknown;
     try {
@@ -261,15 +271,26 @@ export class ResticSource extends BaseSecretSource {
     return this.sanitizeOutput(toError(error).message);
   }
 
-  private async runRestic(args: string[]): Promise<string> {
+  private abortError(signal: AbortSignal | undefined): Error {
+    return signal?.reason instanceof Error
+      ? signal.reason
+      : new Error("Sync cycle aborted");
+  }
+
+  private async runRestic(
+    args: string[],
+    signal?: AbortSignal,
+  ): Promise<string> {
     const retries = this.getRetries();
     let lastError: unknown;
 
     for (let attempt = 0; attempt <= retries; attempt++) {
+      signal?.throwIfAborted();
       try {
-        return await this.runResticOnce(args);
+        return await this.runResticOnce(args, signal);
       } catch (error) {
         lastError = error;
+        signal?.throwIfAborted();
         const code = (error as { code?: string })?.code;
         if (code === "ENOENT" || attempt >= retries) {
           throw error;
@@ -286,7 +307,10 @@ export class ResticSource extends BaseSecretSource {
     throw lastError;
   }
 
-  private runResticOnce(args: string[]): Promise<string> {
+  private runResticOnce(
+    args: string[],
+    signal?: AbortSignal,
+  ): Promise<string> {
     return new Promise((resolve, reject) => {
       const timeoutMs = this.getTimeoutMs();
       const env: NodeJS.ProcessEnv = {
@@ -298,7 +322,7 @@ export class ResticSource extends BaseSecretSource {
       const extraArgs = this.parseExtraOptions(this.config.RESTIC_OPTIONS);
       const fullArgs = [...args, ...extraArgs];
 
-      const child = spawn("restic", fullArgs, { env });
+      const child = spawn("restic", fullArgs, { env, signal });
       let stdout = "";
       let stderr = "";
       let settled = false;
@@ -309,8 +333,14 @@ export class ResticSource extends BaseSecretSource {
         }
         settled = true;
         clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
         settle();
       };
+
+      const onAbort = () => {
+        finish(() => reject(this.abortError(signal)));
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
 
       const timer = setTimeout(() => {
         finish(() => {

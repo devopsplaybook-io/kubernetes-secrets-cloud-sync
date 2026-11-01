@@ -21,6 +21,7 @@ const logger = OTelLogger().createModuleLogger("app");
 
 const CONFIG_WATCH_INTERVAL_MS = 10_000;
 const CONFIG_RELOAD_DEBOUNCE_MS = 1_000;
+const DEFAULT_SHUTDOWN_GRACE_SECONDS = 15;
 
 /**
  * Settings copied into the sources, Kubernetes client, scheduler or OTel SDK
@@ -38,6 +39,10 @@ const RESTART_ONLY_FIELDS: string[] = [
   "AWS_SECRETSMANAGER_REGION",
   "AWS_SECRETSMANAGER_ACCESS_KEY_ID",
   "AWS_SECRETSMANAGER_SECRET_ACCESS_KEY",
+  "AWS_SECRETSMANAGER_CONNECT_TIMEOUT_MS",
+  "AWS_SECRETSMANAGER_REQUEST_TIMEOUT_MS",
+  "K8S_REQUEST_TIMEOUT_MS",
+  "K8S_RETRY_MAX_ATTEMPTS",
   "OPENTELEMETRY_COLLECTOR_HTTP_TRACES",
   "OPENTELEMETRY_COLLECTOR_HTTP_METRICS",
   "OPENTELEMETRY_COLLECTOR_HTTP_LOGS",
@@ -75,6 +80,9 @@ export function jobExitCode(
   result: SyncRunResult,
   allowedPartialFailures: number,
 ): 0 | 1 {
+  if (result.deadlineExceeded) {
+    return 1;
+  }
   if (!result.namespaceListSucceeded) {
     return 1;
   }
@@ -94,6 +102,39 @@ export function jobExitCode(
 function isJobMode(config: Config): boolean {
   const value = config.JOB_MODE as string | boolean;
   return value === true || value === "true" || value === "1";
+}
+
+/**
+ * Bound the shutdown drain so a stalled cycle cannot keep the process alive
+ * forever. Resolves after the in-flight run settles or the grace expires.
+ */
+export async function drainWithGrace(
+  whenIdle: () => Promise<void>,
+  graceSeconds: number,
+): Promise<boolean> {
+  const seconds =
+    Number.isFinite(graceSeconds) && graceSeconds > 0
+      ? graceSeconds
+      : DEFAULT_SHUTDOWN_GRACE_SECONDS;
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<"expired">((resolve) => {
+    timer = setTimeout(() => resolve("expired"), seconds * 1000);
+    timer.unref?.();
+  });
+  const outcome = await Promise.race([
+    whenIdle().then(() => "idle" as const),
+    timeout,
+  ]);
+  if (timer) {
+    clearTimeout(timer);
+  }
+  if (outcome === "expired") {
+    logger.warn(
+      `Shutdown grace period of ${seconds}s expired with a sync cycle still in flight; exiting anyway`,
+    );
+    return false;
+  }
+  return true;
 }
 
 function initTelemetry(config: Config): TelemetryBundle {
@@ -332,7 +373,10 @@ export async function main(): Promise<void> {
     } catch (error) {
       logger.error("Failed to close the HTTP API", toError(error));
     }
-    await runner.whenIdle();
+    await drainWithGrace(
+      () => runner.whenIdle(),
+      Number(config.SHUTDOWN_GRACE_PERIOD_SECONDS),
+    );
     await shutdownTelemetry();
     process.exit(0);
   };
