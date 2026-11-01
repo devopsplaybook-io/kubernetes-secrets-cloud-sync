@@ -1,4 +1,8 @@
-import { maskUrlUserinfo, sanitizeResticOutput } from "./Redaction";
+import {
+  maskSensitiveOptionValues,
+  maskUrlUserinfo,
+  sanitizeResticOutput,
+} from "./Redaction";
 
 describe("maskUrlUserinfo", () => {
   it("masks user:password in a URL", () => {
@@ -59,6 +63,57 @@ describe("maskUrlUserinfo", () => {
   });
 });
 
+describe("maskSensitiveOptionValues", () => {
+  it("masks the equals form", () => {
+    expect(maskSensitiveOptionValues("--sftp.password=hunter2")).toBe(
+      "--sftp.password=***",
+    );
+    expect(maskSensitiveOptionValues("--api-key=abc123")).toBe("--api-key=***");
+  });
+
+  it("masks the space-separated form", () => {
+    expect(maskSensitiveOptionValues("--sftp.password hunter2")).toBe(
+      "--sftp.password ***",
+    );
+    expect(maskSensitiveOptionValues("--auth-file /run/auth")).toBe(
+      "--auth-file ***",
+    );
+  });
+
+  it("masks single- and double-quoted values", () => {
+    expect(maskSensitiveOptionValues('--sftp.password="a b"')).toBe(
+      "--sftp.password=***",
+    );
+    expect(maskSensitiveOptionValues("--token 'a b'")).toBe("--token ***");
+  });
+
+  it("masks several sensitive flags in one string", () => {
+    expect(
+      maskSensitiveOptionValues(
+        "--repo /srv --sftp.password=one --sftp.key two --keep-cache",
+      ),
+    ).toBe("--repo /srv --sftp.password=*** --sftp.key *** --keep-cache");
+  });
+
+  it("leaves non-sensitive flags readable", () => {
+    expect(maskSensitiveOptionValues("--option secret-value")).toBe(
+      "--option secret-value",
+    );
+    expect(maskSensitiveOptionValues("--verbose --json --repo /r")).toBe(
+      "--verbose --json --repo /r",
+    );
+  });
+
+  it("returns empty input unchanged", () => {
+    expect(maskSensitiveOptionValues("")).toBe("");
+  });
+
+  it("is idempotent", () => {
+    const once = maskSensitiveOptionValues("--sftp.password=one --token two");
+    expect(maskSensitiveOptionValues(once)).toBe(once);
+  });
+});
+
 describe("sanitizeResticOutput", () => {
   const repository = "s3:https://user:secret@bucket.example.com/restic";
   const password = "restic-password";
@@ -106,5 +161,16 @@ describe("sanitizeResticOutput", () => {
         options: "",
       }),
     ).toBe("nothing to mask");
+  });
+
+  it("masks a sensitive flag fragment that is not the configured options string", () => {
+    const sanitized = sanitizeResticOutput(
+      "warning: ignoring --sftp.password=option-secret for the retry",
+      { options: "--verbose" },
+    );
+    expect(sanitized).toBe(
+      "warning: ignoring --sftp.password=*** for the retry",
+    );
+    expect(sanitized).not.toContain("option-secret");
   });
 });

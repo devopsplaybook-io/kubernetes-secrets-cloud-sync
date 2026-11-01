@@ -6,7 +6,7 @@ import {
 import { watchFile } from "fs-extra";
 import { FastifyInstance } from "fastify";
 import cron, { ScheduledTask } from "node-cron";
-import { SyncStatus, createApiServer } from "./Api";
+import { SyncStatus, assertSafeApiBinding, createApiServer } from "./Api";
 import { Config } from "./Config";
 import { KubernetesClient } from "./KubernetesClient";
 import { AlibabaKmsSource } from "./sources/AlibabaKmsSource";
@@ -53,6 +53,7 @@ const RESTART_ONLY_FIELDS: string[] = [
   "LOG_LEVEL",
   "API_PORT",
   "API_HOST",
+  "API_AUTH_TOKEN",
 ];
 
 interface TelemetryBundle {
@@ -245,6 +246,12 @@ export async function main(): Promise<void> {
     throw new Error(
       `Invalid SYNC_CRON_SCHEDULE: "${config.SYNC_CRON_SCHEDULE}"`,
     );
+  }
+
+  // Refuse an exposed, unauthenticated API before doing any other work, so a
+  // misconfigured deployment exits 1 instead of starting unsafely.
+  if (!jobMode) {
+    assertSafeApiBinding(config);
   }
 
   // Initialize secret sources

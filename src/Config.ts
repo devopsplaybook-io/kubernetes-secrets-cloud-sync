@@ -55,6 +55,7 @@ export class Config implements ConfigOTelInterface {
   public SYNC_WRITE_CONCURRENCY = 4;
   public SYNC_ALLOWED_PARTIAL_FAILURES = 0;
   public SYNC_CYCLE_TIMEOUT_SECONDS = 300;
+  public SYNC_MAX_SECRETS_PER_ANNOTATION: number | string = 100;
   public SHUTDOWN_GRACE_PERIOD_SECONDS = 15;
 
   // Kubernetes client configuration
@@ -63,7 +64,9 @@ export class Config implements ConfigOTelInterface {
 
   // HTTP API configuration
   public API_PORT = 8080;
-  public API_HOST = "0.0.0.0";
+  public API_HOST = "127.0.0.1";
+  public API_AUTH_TOKEN = "";
+  public API_SYNC_MIN_INTERVAL_SECONDS: number | string = 10;
 
   // Alibaba KMS configuration
   public ALIBABA_KMS_REGION = "";
@@ -171,6 +174,7 @@ export class Config implements ConfigOTelInterface {
     setBoundedIntIfSet("SYNC_WRITE_CONCURRENCY", 4, 1, 32);
     setBoundedIntIfSet("SYNC_ALLOWED_PARTIAL_FAILURES", 0, 0, 10000);
     setBoundedIntIfSet("SYNC_CYCLE_TIMEOUT_SECONDS", 300, 1, 7200);
+    setBoundedIntIfSet("SYNC_MAX_SECRETS_PER_ANNOTATION", 100, 1, 1000);
     setBoundedIntIfSet("SHUTDOWN_GRACE_PERIOD_SECONDS", 15, 1, 300);
     setBoundedIntIfSet("K8S_REQUEST_TIMEOUT_MS", 30000, 1000, 600000);
     setBoundedIntIfSet("K8S_RETRY_MAX_ATTEMPTS", 3, 1, 10);
@@ -179,10 +183,26 @@ export class Config implements ConfigOTelInterface {
     setBoundedIntIfSet("API_PORT", 8080, 1, 65535);
     setIfSet("API_HOST");
     if (typeof this.API_HOST !== "string" || this.API_HOST.trim() === "") {
-      this.API_HOST = "0.0.0.0";
+      this.API_HOST = "127.0.0.1";
     } else {
       this.API_HOST = this.API_HOST.trim();
     }
+    // The bearer token is environment-only: a value in config.json is ignored
+    // so it can never be baked into the image or a ConfigMap.
+    this.API_AUTH_TOKEN = process.env.API_AUTH_TOKEN ?? "";
+    if (this.API_AUTH_TOKEN !== "") {
+      logger.info(
+        "Configuration Value: API_AUTH_TOKEN: ******************** (from environment)",
+      );
+    } else {
+      logger.info("Configuration Value: API_AUTH_TOKEN: (not set)");
+    }
+    if (content["API_AUTH_TOKEN"] !== undefined) {
+      logger.warn(
+        "Configuration Value: API_AUTH_TOKEN must be set from the environment; the config.json value is ignored",
+      );
+    }
+    setBoundedIntIfSet("API_SYNC_MIN_INTERVAL_SECONDS", 10, 0, 3600);
 
     // Alibaba KMS configuration
     setIfSet("ALIBABA_KMS_REGION");
@@ -210,7 +230,7 @@ export class Config implements ConfigOTelInterface {
     setIfSet("RESTIC_REPOSITORY", false);
     setIfSet("RESTIC_PASSWORD", false);
     setIfSet("RESTIC_PATH");
-    setIfSet("RESTIC_OPTIONS");
+    setIfSet("RESTIC_OPTIONS", false);
     setIfSet("RESTIC_HOST");
     setIfSet("RESTIC_TAG");
     setIfSet("RESTIC_SNAPSHOT_PATH");

@@ -71,7 +71,7 @@ running when the deadline fires is aborted, the cycle counts one error, sets
 `deadlineExceeded`, and `jobExitCode()` exits 1.
 
 1. `KubernetesClient.getNamespaceSyncRequests()` - lists all namespaces, parses sync annotations
-2. `SecretSync` pre-collects the union of requested secrets per provider and per-namespace upsert targets; colliding names are skipped (others continue), and each unique `(provider, secret)` is fetched exactly once per cycle
+2. `SecretSync` pre-collects the union of requested secrets per provider and per-namespace upsert targets; colliding names are skipped (others continue), and each unique `(provider, secret)` is fetched exactly once per cycle. A provider annotation with more than `SYNC_MAX_SECRETS_PER_ANNOTATION` names is skipped as a whole with one error naming the namespace/provider/count/limit, and the namespace is marked failed
 3. Providers that are not registered in the annotation, or registered but unavailable, are **not** silently skipped: each one is logged distinctly, added to `unknownProviders` / `unavailableProviders`, marks the namespace as failed and counts an error, so the run cannot report success and the job exits non-zero. A secret missing from an available provider is logged separately as a not-found and counts as a fetch failure.
 4. Sources that implement `beginCycle(secretNames, options)` are called once per cycle with the union of names (Restic resolves its snapshot there); `SecretSync` applies bounded `SYNC_FETCH_CONCURRENCY` for fetching and `SYNC_WRITE_CONCURRENCY` for Kubernetes writes, with per-item error isolation; `endCycle()` always runs in `finally`
 5. `KubernetesClient.upsertSecret()` - GET the Secret, enforce the instance-aware ownership guard (see below), then create or patch with an RFC 6902 JSON Patch. Per-key `add`/`remove` operations touch only labels/annotations this controller owns, so concurrent writers of other keys are not clobbered; the patch starts with `test /metadata/resourceVersion` so a Secret changed since the GET fails with 409. On conflict the client re-reads, re-asserts ownership and retries the patch once. Both the `cloudsync.devopsplaybook.io/data-hash` annotation and the actual data are compared first: unchanged Secrets are not written, metadata-only changes produce a metadata-only patch, and a payload change patches `data` together with the new hash. Legacy Secrets without a `data-hash` annotation only get metadata patched on the first cycle.
@@ -105,22 +105,31 @@ Overlap protection is per process: run a single replica (CronJobs keep
 
 In deployment mode the HTTP API (`src/Api.ts`) starts on
 `API_HOST`/`API_PORT` before cron scheduling and the initial sync, so probes
-succeed while the first cycle runs. `POST /api/sync` uses the same
-`SingleFlightRunner`, so a manual trigger during a cron/initial run returns
-409 instead of starting a second cycle. Job mode never listens.
-
-`SIGTERM`/`SIGINT` stop the scheduler, close the HTTP server, drain the
-in-flight run (`SingleFlightRunner.whenIdle`) bounded by
-`SHUTDOWN_GRACE_PERIOD_SECONDS`, shut down logger/tracer/meter, then exit. Job
-mode awaits the same shutdown before `process.exit`.
+succeed while the first cycle runs. `API_HOST` defaults to `127.0.0.1`;
+`assertSafeApiBinding()` (called in `App.main` and again at the top of
+`createApiServer`) fails startup when the host is blank or non-loopback without
+`API_AUTH_TOKEN` — only `localhost`, `::1`, `[::1]` and `127.0.0.0/8` are
+private. `POST /api/sync` uses the same `SingleFlightRunner`, so a manual
+trigger during a cron/initial run returns 409 instead of starting a second
+cycle; when `API_AUTH_TOKEN` is set it first requires a constant-time
+`Authorization: Bearer` check (401 + `WWW-Authenticate` otherwise), then applies
+an in-process `API_SYNC_MIN_INTERVAL_SECONDS` cooldown (429 + `Retry-After`)
+before accepting (202). `GET /api/status` stays unauthenticated. Job mode never
+listens and never checks the binding.
 
 Configuration reload (deployment mode) polls `config.json` every 10s with a 1s
 debounce, serializes reloads, and reschedules cron when
 `SYNC_CRON_SCHEDULE` changes. Settings bound at construction time
 (`JOB_MODE`, prefixes, cloud regions/credentials, `LOG_LEVEL`, Kubernetes
-request timeout/retry settings, AWS SDK HTTP timeouts, all `OPENTELEMETRY_*`)
-only log a value-free restart warning. The watcher is not installed in job
-mode.
+request timeout/retry settings, AWS SDK HTTP timeouts, `API_HOST`, `API_PORT`,
+`API_AUTH_TOKEN`, all `OPENTELEMETRY_*`) only log a value-free restart warning.
+`API_AUTH_TOKEN` is read from the environment only (a `config.json` value is
+ignored with a warning). The watcher is not installed in job mode.
+
+`SIGTERM`/`SIGINT` stop the scheduler, close the HTTP server, drain the
+in-flight run (`SingleFlightRunner.whenIdle`) bounded by
+`SHUTDOWN_GRACE_PERIOD_SECONDS`, shut down logger/tracer/meter, then exit. Job
+mode awaits the same shutdown before `process.exit`.
 
 ### Observability
 
@@ -130,9 +139,12 @@ cycle, plus `source-begin-cycle`, `source-fetch`, `source-end-cycle` and one
 span per Kubernetes API call. HTTP requests under `/api` get server spans from
 `@devopsplaybook.io/otel-utils-fastify` (registered without a meter);
 `GET /api/status` is excluded to keep probe noise out of traces. Do **not**
-add custom metrics. Restic output is
-sanitized by `src/Redaction.ts` before it reaches logs or errors, and
-`RESTIC_REPOSITORY` is masked in the config dump.
+add custom metrics. Restic output is sanitized by `src/Redaction.ts` before it
+reaches logs or errors: URL userinfo and the configured repository/password/
+`RESTIC_OPTIONS` literals are masked, and values of option flags whose name
+contains password/passwd/secret/token/key/credential/auth are masked too.
+`RESTIC_REPOSITORY`, `RESTIC_PASSWORD` and the whole `RESTIC_OPTIONS` string are
+masked in the config dump; `API_AUTH_TOKEN` is never logged.
 
 ### Secret Naming
 
@@ -178,9 +190,11 @@ is a valid label value (<= 63 chars). `src/SecretName.ts` holds the pure helpers
 
 The controller holds account-wide cloud credentials and a ClusterRole over all
 Secrets: anyone who can patch a namespace's `secrets.cloudsync.devopsplaybook.io/*`
-annotations can copy any readable cloud secret into that namespace. This is
-documented in the README; there is no built-in per-namespace allow-list —
-restrict annotation edits with RBAC/admission policies and scope credentials.
+annotations can copy any readable cloud secret into that namespace. There is no
+built-in per-namespace allow-list; the README documents the mandatory controls
+(RBAC on namespaces, a `ValidatingAdmissionPolicy` denying annotation edits by
+untrusted users, one instance per trust boundary, narrowly scoped credentials,
+private API binding). Do not weaken those defaults in code.
 
 ## Configuration
 
@@ -203,13 +217,16 @@ Key configuration values:
 - `SYNC_WRITE_CONCURRENCY` - max concurrent Kubernetes writes (default: `4`, clamped 1-32)
 - `SYNC_ALLOWED_PARTIAL_FAILURES` - job-mode error budget before exit 1 (default: `0`, clamped 0-10000)
 - `SYNC_CYCLE_TIMEOUT_SECONDS` - per-cycle deadline; in-flight work is aborted when it fires (default: `300`, clamped 1-7200)
+- `SYNC_MAX_SECRETS_PER_ANNOTATION` - max secret names in one provider annotation; an over-limit annotation is skipped with an error and marks the namespace failed (default: `100`, clamped 1-1000)
 - `SHUTDOWN_GRACE_PERIOD_SECONDS` - how long shutdown waits for the in-flight cycle (default: `15`, clamped 1-300)
 - `K8S_REQUEST_TIMEOUT_MS` - per-attempt Kubernetes request timeout (default: `30000`, clamped 1000-600000, restart-only)
 - `K8S_RETRY_MAX_ATTEMPTS` - attempts for idempotent Kubernetes calls on 429/5xx/network/timeout (default: `3`, clamped 1-10, restart-only)
 - `AWS_SECRETSMANAGER_CONNECT_TIMEOUT_MS` - AWS SDK connection timeout (default: `10000`, restart-only)
 - `AWS_SECRETSMANAGER_REQUEST_TIMEOUT_MS` - AWS SDK request timeout (default: `30000`, restart-only)
 - `API_PORT` - HTTP API listen port, deployment mode only (default: `8080`, clamped 1-65535, restart-only)
-- `API_HOST` - HTTP API listen address (default: `0.0.0.0`, blank falls back to the default, restart-only)
+- `API_HOST` - HTTP API listen address (default: `127.0.0.1`, blank falls back to the default, restart-only; a non-loopback value without `API_AUTH_TOKEN` fails startup)
+- `API_AUTH_TOKEN` - optional bearer token for `POST /api/sync`; environment-only (a `config.json` value is ignored with a warning), never logged, restart-only
+- `API_SYNC_MIN_INTERVAL_SECONDS` - manual-sync cooldown, `0` disables (default: `10`, clamped 0-3600, applied live)
 - `RESTIC_TIMEOUT_SECONDS` - per-invocation restic timeout, whole process group killed (default: `120`)
 - `RESTIC_RETRIES` - transient restic failure retries (default: `2`)
 - `RESTIC_HOST` / `RESTIC_TAG` / `RESTIC_SNAPSHOT_PATH` - optional `restic snapshots` filters (default: empty = all snapshots). `RESTIC_SNAPSHOT_PATH` filters snapshots by backed-up path; `RESTIC_PATH` selects the folder inside a snapshot for `dump`
@@ -242,4 +259,7 @@ npm audit --omit=dev # production dependencies must be vulnerability-free
 ```
 
 All four must pass. Add tests for new code paths, especially new secret source
-implementations and sync logic changes.
+implementations and sync logic changes. CI also runs a pinned gitleaks scan
+(`secret-scan` job in `.github/workflows/pr-check.yml`) over the working tree;
+`.env`, `.env.*` and `*.env` files are git- and Docker-ignored and must never be
+committed.

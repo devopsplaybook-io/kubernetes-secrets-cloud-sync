@@ -865,34 +865,76 @@ describe("ResticSource", () => {
       expect(error.message).not.toContain("secret-value");
     });
 
+    function captureConsole() {
+      const lines: string[] = [];
+      const record = (...args: unknown[]) => {
+        lines.push(args.map((arg) => String(arg)).join(" "));
+      };
+      const spies = [
+        jest.spyOn(console, "log").mockImplementation(record),
+        jest.spyOn(console, "warn").mockImplementation(record),
+        jest.spyOn(console, "error").mockImplementation(record),
+      ];
+      return {
+        lines,
+        text: () => lines.join("\n"),
+        restore: () => spies.forEach((spy) => spy.mockRestore()),
+      };
+    }
+
     it("sanitizes the retry warning", async () => {
       jest.useFakeTimers();
       config.RESTIC_RETRIES = 1;
-      const logs: string[] = [];
-      const logSpy = jest
-        .spyOn(console, "log")
-        .mockImplementation((...args: unknown[]) => {
-          logs.push(args.map(String).join(" "));
-        });
+      const capture = captureConsole();
 
-      const fetch = source.fetchSecret("name-a");
-      const first = spawnedChild();
-      first.stderr.emit(
-        "data",
-        Buffer.from(
-          "temporary failure at s3:https://user:secret@example.com/restic-repo restic-pass",
-        ),
-      );
-      first.emit("close", 1);
+      try {
+        const fetch = source.fetchSecret("name-a");
+        const first = spawnedChild();
+        first.stderr.emit(
+          "data",
+          Buffer.from(
+            "temporary failure at s3:https://user:secret@example.com/restic-repo restic-pass",
+          ),
+        );
+        first.emit("close", 1);
 
-      await jest.advanceTimersByTimeAsync(0);
-      await jest.advanceTimersByTimeAsync(1000);
-      completeDump({ key: "value" });
-      await expect(fetch).resolves.toMatchObject({ secretName: "name-a" });
+        await jest.advanceTimersByTimeAsync(0);
+        await jest.advanceTimersByTimeAsync(1000);
+        completeDump({ key: "value" });
+        await expect(fetch).resolves.toMatchObject({ secretName: "name-a" });
+      } finally {
+        capture.restore();
+      }
 
-      expect(logs.some((line) => line.includes("user:secret"))).toBe(false);
-      expect(logs.some((line) => line.includes("restic-pass"))).toBe(false);
-      logSpy.mockRestore();
+      expect(capture.text()).toContain("***");
+      expect(capture.text()).not.toContain("user:secret");
+      expect(capture.text()).not.toContain("restic-pass");
+    });
+
+    it("masks a sensitive option fragment echoed by restic", async () => {
+      jest.useFakeTimers();
+      config.RESTIC_RETRIES = 1;
+      const capture = captureConsole();
+
+      try {
+        const fetch = source.fetchSecret("name-a");
+        const first = spawnedChild();
+        first.stderr.emit(
+          "data",
+          Buffer.from("temporary failure using --sftp.password=option-secret"),
+        );
+        first.emit("close", 1);
+
+        await jest.advanceTimersByTimeAsync(0);
+        await jest.advanceTimersByTimeAsync(1000);
+        completeDump({ key: "value" });
+        await expect(fetch).resolves.toMatchObject({ secretName: "name-a" });
+      } finally {
+        capture.restore();
+      }
+
+      expect(capture.text()).toContain("--sftp.password=***");
+      expect(capture.text()).not.toContain("option-secret");
     });
   });
 });
