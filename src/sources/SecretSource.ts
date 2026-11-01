@@ -5,6 +5,12 @@ export const K8S_SECRET_KEY_PATTERN = /^[-._a-zA-Z0-9]+$/;
 /** Kubernetes Secrets are limited to 1 MiB of data. */
 export const MAX_SECRET_DATA_BYTES = 1024 * 1024;
 
+/** Per-call options shared by every provider operation. */
+export interface SecretFetchOptions {
+  /** Cycle deadline signal; providers must stop work when it aborts. */
+  signal?: AbortSignal;
+}
+
 /**
  * Generic interface for cloud secret providers.
  * Implementations fetch secrets from specific cloud KMS/vault services.
@@ -25,9 +31,13 @@ export interface SecretSource {
   /**
    * Fetch a secret by name from the cloud provider.
    * @param secretName - The name/identifier of the secret in the cloud provider
+   * @param options - Optional cycle deadline signal
    * @returns The secret data as key-value pairs
    */
-  fetchSecret(secretName: string): Promise<SecretFetchResult>;
+  fetchSecret(
+    secretName: string,
+    options?: SecretFetchOptions,
+  ): Promise<SecretFetchResult>;
 
   /**
    * Check if the secret source is properly configured and available.
@@ -40,7 +50,10 @@ export interface SecretSource {
    * cycle will request. Sources that benefit from shared setup (e.g. resolving
    * a snapshot) implement it.
    */
-  beginCycle?(secretNames: string[]): Promise<void>;
+  beginCycle?(
+    secretNames: string[],
+    options?: SecretFetchOptions,
+  ): Promise<void>;
 
   /** Optional per-cycle cleanup hook, always called after the cycle. */
   endCycle?(): void | Promise<void>;
@@ -53,7 +66,10 @@ export abstract class BaseSecretSource implements SecretSource {
   abstract readonly providerName: string;
 
   abstract init(): Promise<void>;
-  abstract fetchSecret(secretName: string): Promise<SecretFetchResult>;
+  abstract fetchSecret(
+    secretName: string,
+    options?: SecretFetchOptions,
+  ): Promise<SecretFetchResult>;
   abstract isAvailable(): boolean;
 
   /**

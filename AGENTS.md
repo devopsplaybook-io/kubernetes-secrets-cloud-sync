@@ -46,8 +46,9 @@ Cloud providers implement the `SecretSource` interface:
 
 1. `providerName` - matches the annotation suffix (e.g., `alibaba-kms`, `aws-secretsmanager`, `restic`)
 2. `init()` - called once at startup to authenticate/initialize the client
-3. `fetchSecret(secretName)` - returns a `SecretFetchResult` with plaintext key-value data
+3. `fetchSecret(secretName, options?)` - returns a `SecretFetchResult` with plaintext key-value data; `options.signal` is the cycle deadline signal and must abort in-flight work
 4. `isAvailable()` - returns true only when all required config is present
+5. `beginCycle(secretNames, options?)` / `endCycle()` - optional per-cycle hooks (Restic resolves its snapshot there); `beginCycle` receives the same abort signal
 
 New providers extend `BaseSecretSource` which provides `validateSecretData()` and `buildResult()` helpers.
 
@@ -63,12 +64,29 @@ Multiple providers per namespace are supported via multiple annotations. Secret 
 
 ### Sync Flow
 
+Every cycle runs under a deadline (`SYNC_CYCLE_TIMEOUT_SECONDS`) enforced by an
+`AbortController` whose signal is propagated to namespace listing, source
+`beginCycle`/`fetchSecret`, Kubernetes writes and orphan deletions. Work still
+running when the deadline fires is aborted, the cycle counts one error, sets
+`deadlineExceeded`, and `jobExitCode()` exits 1.
+
 1. `KubernetesClient.getNamespaceSyncRequests()` - lists all namespaces, parses sync annotations
 2. `SecretSync` pre-collects the union of requested secrets per provider and per-namespace upsert targets; colliding names are skipped (others continue), and each unique `(provider, secret)` is fetched exactly once per cycle
-3. Sources that implement `beginCycle(secretNames)` are called once per cycle with the union of names (Restic resolves its snapshot there); `SecretSync` applies bounded `SYNC_FETCH_CONCURRENCY` for fetching and `SYNC_WRITE_CONCURRENCY` for Kubernetes writes, with per-item error isolation; `endCycle()` always runs in `finally`
-4. `KubernetesClient.upsertSecret()` - GET the Secret, enforce the managed-by ownership guard (or the `cloudsync.devopsplaybook.io/adopt: "true"` annotation), then create or patch (RFC 6902 JSON Patch, 409 retried once, 404 falls back to create). Both the `cloudsync.devopsplaybook.io/data-hash` annotation and the actual data are compared first: unchanged Secrets are not written, metadata-only changes produce a metadata-only patch
-5. Managed secrets are labeled with `app.kubernetes.io/managed-by=kubernetes-secrets-cloud-sync` and `cloudsync.devopsplaybook.io/instance=<id>`; the original cloud identifier is stored in the `cloudsync.devopsplaybook.io/source-name` annotation and the payload hash in `cloudsync.devopsplaybook.io/data-hash`
-6. Orphan cleanup (when enabled) deletes only Secrets of this instance (`managed-by` + `instance` labels) no longer referenced by any annotation, honoring `ORPHAN_CLEANUP_DRY_RUN` and `ORPHAN_CLEANUP_MAX_DELETIONS`
+3. Providers that are not registered in the annotation, or registered but unavailable, are **not** silently skipped: each one is logged distinctly, added to `unknownProviders` / `unavailableProviders`, marks the namespace as failed and counts an error, so the run cannot report success and the job exits non-zero. A secret missing from an available provider is logged separately as a not-found and counts as a fetch failure.
+4. Sources that implement `beginCycle(secretNames, options)` are called once per cycle with the union of names (Restic resolves its snapshot there); `SecretSync` applies bounded `SYNC_FETCH_CONCURRENCY` for fetching and `SYNC_WRITE_CONCURRENCY` for Kubernetes writes, with per-item error isolation; `endCycle()` always runs in `finally`
+5. `KubernetesClient.upsertSecret()` - GET the Secret, enforce the instance-aware ownership guard (see below), then create or patch with an RFC 6902 JSON Patch. Per-key `add`/`remove` operations touch only labels/annotations this controller owns, so concurrent writers of other keys are not clobbered; the patch starts with `test /metadata/resourceVersion` so a Secret changed since the GET fails with 409. On conflict the client re-reads, re-asserts ownership and retries the patch once. Both the `cloudsync.devopsplaybook.io/data-hash` annotation and the actual data are compared first: unchanged Secrets are not written, metadata-only changes produce a metadata-only patch, and a payload change patches `data` together with the new hash. Legacy Secrets without a `data-hash` annotation only get metadata patched on the first cycle.
+6. Managed secrets are labeled with `app.kubernetes.io/managed-by=kubernetes-secrets-cloud-sync` and `cloudsync.devopsplaybook.io/instance=<id>`; the original cloud identifier is stored in the `cloudsync.devopsplaybook.io/source-name` annotation and the payload hash in `cloudsync.devopsplaybook.io/data-hash`
+7. Orphan cleanup (when enabled) deletes only Secrets of this instance (`managed-by` + `instance` labels) no longer referenced by any annotation, honoring `ORPHAN_CLEANUP_DRY_RUN` and `ORPHAN_CLEANUP_MAX_DELETIONS`. Hitting the maximum aborts cleanup, counts an error and reports `cleanupAborted` instead of a silent success
+
+### Kubernetes request retries and timeouts
+
+All Kubernetes calls run through `withRetry()` (`KubernetesClient.ts`) with a
+per-attempt `AbortController` bounded by `K8S_REQUEST_TIMEOUT_MS`. Idempotent
+operations (GET/PATCH/DELETE) retry up to `K8S_RETRY_MAX_ATTEMPTS` on 429, 5xx,
+network errors and timeouts, with jittered exponential backoff honoring
+`Retry-After`; 4xx (including 409, handled separately) are never retried and
+`create` is never retried. Timeouts surface as `KubernetesRequestTimeoutError`
+(`name = "TimeoutError"`, counted as retryable).
 
 ### Startup
 
@@ -77,9 +95,10 @@ the initial sync, so a stalled initial sync cannot prevent future cycles. A
 `SingleFlightRunner` makes a cron tick share the in-flight run instead of
 starting a second one. In job mode the process runs one cycle and exits; the
 exit code comes from `jobExitCode()` (`App.ts`): `1` when listing namespaces
-failed, when `errors > SYNC_ALLOWED_PARTIAL_FAILURES`, or when secrets were
-requested but none could be fetched. An invalid `SYNC_CRON_SCHEDULE` fails
-startup before any source is initialized.
+failed, when the cycle deadline was exceeded, when
+`errors > SYNC_ALLOWED_PARTIAL_FAILURES`, or when secrets were requested but
+none could be fetched. An invalid `SYNC_CRON_SCHEDULE` fails startup before any
+source is initialized.
 
 Overlap protection is per process: run a single replica (CronJobs keep
 `concurrencyPolicy: Forbid`).
@@ -91,15 +110,17 @@ succeed while the first cycle runs. `POST /api/sync` uses the same
 409 instead of starting a second cycle. Job mode never listens.
 
 `SIGTERM`/`SIGINT` stop the scheduler, close the HTTP server, drain the
-in-flight run (`SingleFlightRunner.whenIdle`), shut down logger/tracer/meter,
-then exit. Job mode awaits the same shutdown before `process.exit`.
+in-flight run (`SingleFlightRunner.whenIdle`) bounded by
+`SHUTDOWN_GRACE_PERIOD_SECONDS`, shut down logger/tracer/meter, then exit. Job
+mode awaits the same shutdown before `process.exit`.
 
 Configuration reload (deployment mode) polls `config.json` every 10s with a 1s
 debounce, serializes reloads, and reschedules cron when
 `SYNC_CRON_SCHEDULE` changes. Settings bound at construction time
-(`JOB_MODE`, prefixes, cloud regions/credentials, `LOG_LEVEL`, all
-`OPENTELEMETRY_*`) only log a value-free restart warning. The watcher is not
-installed in job mode.
+(`JOB_MODE`, prefixes, cloud regions/credentials, `LOG_LEVEL`, Kubernetes
+request timeout/retry settings, AWS SDK HTTP timeouts, all `OPENTELEMETRY_*`)
+only log a value-free restart warning. The watcher is not installed in job
+mode.
 
 ### Observability
 
@@ -126,7 +147,11 @@ is a valid label value (<= 63 chars). `src/SecretName.ts` holds the pure helpers
 
 - Never overwrite a Secret whose `app.kubernetes.io/managed-by` label is not
   `kubernetes-secrets-cloud-sync`; adoption requires
-  `cloudsync.devopsplaybook.io/adopt: "true"`. Foreign labels/annotations are
+  `cloudsync.devopsplaybook.io/adopt: "true"`. Ownership is also
+  instance-aware: a Secret carrying another
+  `cloudsync.devopsplaybook.io/instance` is refused unless adopted, while a
+  Secret without the instance label (created before instance scoping) is
+  treated as owned and has the label backfilled. Foreign labels/annotations are
   preserved on update.
 - `BaseSecretSource.validateSecretData()` rejects invalid keys
   (`[-._a-zA-Z0-9]+`), nested objects/arrays and payloads above 1 MiB; scalars
@@ -170,6 +195,12 @@ Key configuration values:
 - `SYNC_FETCH_CONCURRENCY` - max concurrent cloud fetches (default: `4`, clamped 1-32)
 - `SYNC_WRITE_CONCURRENCY` - max concurrent Kubernetes writes (default: `4`, clamped 1-32)
 - `SYNC_ALLOWED_PARTIAL_FAILURES` - job-mode error budget before exit 1 (default: `0`, clamped 0-10000)
+- `SYNC_CYCLE_TIMEOUT_SECONDS` - per-cycle deadline; in-flight work is aborted when it fires (default: `300`, clamped 1-7200)
+- `SHUTDOWN_GRACE_PERIOD_SECONDS` - how long shutdown waits for the in-flight cycle (default: `15`, clamped 1-300)
+- `K8S_REQUEST_TIMEOUT_MS` - per-attempt Kubernetes request timeout (default: `30000`, clamped 1000-600000, restart-only)
+- `K8S_RETRY_MAX_ATTEMPTS` - attempts for idempotent Kubernetes calls on 429/5xx/network/timeout (default: `3`, clamped 1-10, restart-only)
+- `AWS_SECRETSMANAGER_CONNECT_TIMEOUT_MS` - AWS SDK connection timeout (default: `10000`, restart-only)
+- `AWS_SECRETSMANAGER_REQUEST_TIMEOUT_MS` - AWS SDK request timeout (default: `30000`, restart-only)
 - `API_PORT` - HTTP API listen port, deployment mode only (default: `8080`, clamped 1-65535, restart-only)
 - `API_HOST` - HTTP API listen address (default: `0.0.0.0`, blank falls back to the default, restart-only)
 - `RESTIC_TIMEOUT_SECONDS` - per-invocation restic timeout, SIGKILL (default: `120`)

@@ -49,9 +49,31 @@ describe("AwsSecretsManagerSource", () => {
     it("constructs the client with the region and the default credential chain", async () => {
       await source.init();
 
-      expect(mockClientConstructor).toHaveBeenCalledWith({
-        region: "eu-west-1",
-      });
+      expect(mockClientConstructor).toHaveBeenCalledWith(
+        expect.objectContaining({
+          region: "eu-west-1",
+          requestHandler: expect.anything(),
+        }),
+      );
+    });
+
+    it("configures HTTP timeouts from Config", async () => {
+      config.AWS_SECRETSMANAGER_CONNECT_TIMEOUT_MS = 1_234;
+      config.AWS_SECRETSMANAGER_REQUEST_TIMEOUT_MS = 5_678;
+
+      await source.init();
+
+      const options = mockClientConstructor.mock.calls[0][0] as {
+        requestHandler: {
+          configProvider: Promise<unknown>;
+        };
+      };
+      await expect(options.requestHandler.configProvider).resolves.toMatchObject(
+        {
+          connectionTimeout: 1_234,
+          requestTimeout: 5_678,
+        },
+      );
     });
 
     it("passes static credentials when configured", async () => {
@@ -60,13 +82,15 @@ describe("AwsSecretsManagerSource", () => {
 
       await source.init();
 
-      expect(mockClientConstructor).toHaveBeenCalledWith({
-        region: "eu-west-1",
-        credentials: {
-          accessKeyId: "access-key",
-          secretAccessKey: "secret-key",
-        },
-      });
+      expect(mockClientConstructor).toHaveBeenCalledWith(
+        expect.objectContaining({
+          region: "eu-west-1",
+          credentials: {
+            accessKeyId: "access-key",
+            secretAccessKey: "secret-key",
+          },
+        }),
+      );
     });
 
     it("stores the constructed client", async () => {

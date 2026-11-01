@@ -45,6 +45,14 @@ export interface SyncRunResult {
   failedNamespaces: string[];
   /** Whether the namespace listing call succeeded */
   namespaceListSucceeded: boolean;
+  /** Providers referenced by annotations with no registered source */
+  unknownProviders: string[];
+  /** Providers that are registered but report isAvailable() === false */
+  unavailableProviders: string[];
+  /** Whether orphan cleanup stopped early (deletion threshold or deadline) */
+  cleanupAborted: boolean;
+  /** Whether the cycle deadline aborted the run */
+  deadlineExceeded: boolean;
   /** Cycle duration in milliseconds */
   durationMs: number;
 }

@@ -193,6 +193,10 @@ function syncResult(overrides: Partial<SyncRunResult> = {}): SyncRunResult {
     errors: 0,
     failedNamespaces: [],
     namespaceListSucceeded: true,
+    unknownProviders: [],
+    unavailableProviders: [],
+    cleanupAborted: false,
+    deadlineExceeded: false,
     durationMs: 1,
     ...overrides,
   };
@@ -227,6 +231,10 @@ describe("jobExitCode", () => {
     expect(
       jobExitCode(syncResult({ namespaceListSucceeded: false }), 0),
     ).toBe(1);
+  });
+
+  it("fails when the cycle deadline was exceeded", () => {
+    expect(jobExitCode(syncResult({ deadlineExceeded: true }), 0)).toBe(1);
   });
 
   it("fails when errors exceed the allowed threshold", () => {

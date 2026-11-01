@@ -1,7 +1,7 @@
 import Kms20160120, { GetSecretValueRequest } from "@alicloud/kms20160120";
 import { Config as OpenApiConfig } from "@alicloud/openapi-client";
 import { RuntimeOptions } from "@alicloud/tea-util";
-import { BaseSecretSource } from "./SecretSource";
+import { BaseSecretSource, SecretFetchOptions } from "./SecretSource";
 import { Config } from "../Config";
 import { OTelLogger } from "../OTelContext";
 import { SecretFetchResult } from "../types";
@@ -69,10 +69,14 @@ export class AlibabaKmsSource extends BaseSecretSource {
     );
   }
 
-  async fetchSecret(secretName: string): Promise<SecretFetchResult> {
+  async fetchSecret(
+    secretName: string,
+    options?: SecretFetchOptions,
+  ): Promise<SecretFetchResult> {
     if (!this.client) {
       throw new Error("Alibaba KMS client not initialized");
     }
+    options?.signal?.throwIfAborted();
 
     const request = new GetSecretValueRequest({
       secretName,
@@ -84,7 +88,12 @@ export class AlibabaKmsSource extends BaseSecretSource {
     });
 
     logger.info(`Fetching secret: ${secretName}`);
-    const response = await this.callWithRetry(request, runtime, secretName);
+    const response = await this.callWithRetry(
+      request,
+      runtime,
+      secretName,
+      options?.signal,
+    );
 
     if (!response.body?.secretData) {
       throw new Error(`No secret data returned for secret: ${secretName}`);
@@ -130,15 +139,23 @@ export class AlibabaKmsSource extends BaseSecretSource {
     request: GetSecretValueRequest,
     runtime: RuntimeOptions,
     secretName: string,
+    signal?: AbortSignal,
   ): Promise<Awaited<ReturnType<Kms20160120["getSecretValueWithOptions"]>>> {
     const client = this.client;
     if (!client) {
       throw new Error("Alibaba KMS client not initialized");
     }
     for (let attempt = 1; ; attempt++) {
+      signal?.throwIfAborted();
       try {
-        return await client.getSecretValueWithOptions(request, runtime);
+        // The Alibaba SDK has no AbortSignal support: race the call so a
+        // stalled endpoint cannot hold the cycle past its deadline.
+        return await this.raceAbort(
+          client.getSecretValueWithOptions(request, runtime),
+          signal,
+        );
       } catch (error: unknown) {
+        signal?.throwIfAborted();
         if (attempt >= MAX_ATTEMPTS || !this.isRetryable(error)) {
           throw error;
         }
@@ -153,6 +170,36 @@ export class AlibabaKmsSource extends BaseSecretSource {
         await this.sleep(delay);
       }
     }
+  }
+
+  private raceAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+    if (!signal) {
+      return promise;
+    }
+    if (signal.aborted) {
+      promise.catch(() => undefined);
+      return Promise.reject(this.abortError(signal));
+    }
+    return new Promise<T>((resolve, reject) => {
+      const onAbort = () => reject(this.abortError(signal));
+      signal.addEventListener("abort", onAbort, { once: true });
+      promise.then(
+        (value) => {
+          signal.removeEventListener("abort", onAbort);
+          resolve(value);
+        },
+        (error) => {
+          signal.removeEventListener("abort", onAbort);
+          reject(error);
+        },
+      );
+    });
+  }
+
+  private abortError(signal: AbortSignal): Error {
+    return signal.reason instanceof Error
+      ? signal.reason
+      : new Error("Sync cycle aborted");
   }
 
   private isRetryable(error: unknown): boolean {
