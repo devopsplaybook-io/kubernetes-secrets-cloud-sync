@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   pr-verify:
-    uses: devopsplaybook-io/common-utils/.github/workflows/reusable-pr-verify.yml@main
+    uses: devopsplaybook-io/common-utils/.github/workflows/reusable-pr-verify.yml@608b30f62c685c5cd41661ff3cf14692ced42b16  # main
     with:
       node_app_directories: '["."]'
     secrets:
@@ -28,7 +28,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 1
       - name: Scan the working tree for secrets

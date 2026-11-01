@@ -243,6 +243,23 @@ Binary secrets are supported deliberately: an AWS `SecretBinary` payload and an
 Alibaba KMS secret with `secretDataType=binary` are stored base64-encoded under
 the data key `binary` (never UTF-8 decoded and never JSON parsed).
 
+Providers differ in how they accept text payloads. The matrix below is the
+contract; switching a secret from one provider to another changes which
+payloads are accepted, so store flat JSON objects when a secret must move
+between providers:
+
+| Payload                                             | AWS Secrets Manager                                                    | Alibaba KMS                                | Restic                                        |
+| --------------------------------------------------- | ---------------------------------------------------------------------- | ------------------------------------------ | --------------------------------------------- |
+| Flat JSON object `{"K":"v"}`                        | one data key per field                                                 | same                                       | same (file `<name>.json`)                     |
+| JSON array or scalar (`[1,2]`, `42`, `"x"`, `null`) | stored verbatim under `value`                                          | rejected (`must be a JSON object`)         | rejected (`must contain a JSON object`)       |
+| Non-JSON text                                       | stored verbatim under `value`                                          | rejected (`not valid JSON`)                | rejected (`not valid JSON`)                   |
+| Empty text payload                                  | treated as absent (`No secret data returned`, unless `SecretBinary` is present) | `No secret data returned`                  | empty/invalid JSON fails the secret           |
+| Binary                                              | `SecretBinary` → base64 under `binary`                                 | `secretDataType=binary`, already base64 → `binary` | not supported                          |
+| Nested object/array field values                    | rejected                                                               | rejected                                   | rejected                                      |
+| `null`/`undefined` field values                     | skipped                                                                | skipped                                    | skipped                                       |
+| number/boolean field values                         | stringified                                                            | stringified                                | stringified                                   |
+| Payload above 1 MiB                                 | rejected                                                               | rejected                                   | rejected                                      |
+
 ### Created Secrets
 
 For a KMS secret named `myapplication` containing:
@@ -391,7 +408,10 @@ counted in `errors`, so the job exits non-zero and `/api/status` reports
 reports as not found, which is logged as a per-secret error.
 
 On `SIGTERM`/`SIGINT` the service waits up to `SHUTDOWN_GRACE_PERIOD_SECONDS`
-(default `15`) for the in-flight cycle before exiting.
+(default `15`) for the in-flight cycle, flushes telemetry, then exits. In
+deployment mode it stops the scheduler and closes the HTTP API first and exits
+`0`; in job mode the handlers are installed before the run and it exits `143`
+(`SIGTERM`) or `130` (`SIGINT`).
 
 
 ## Orphan cleanup
@@ -516,6 +536,14 @@ count and duration) is logged before exiting. Raise
 `SYNC_ALLOWED_PARTIAL_FAILURES` only when a small, known number of permanent
 failures should not fail the whole job.
 
+Signals are handled during the run as well: the `SIGTERM`/`SIGINT` handlers are
+installed before the job starts. A signal received while the cycle is running
+drains the in-flight run for up to `SHUTDOWN_GRACE_PERIOD_SECONDS`, flushes
+telemetry and exits with the conventional signal exit code (`143` for
+`SIGTERM`, `130` for `SIGINT`), never `0`, so an evicted job is not reported as
+a successful one. A run that completes on its own keeps the `0`/`1` policy
+above.
+
 ## Observability
 
 When `OPENTELEMETRY_COLLECTOR_HTTP_*` endpoints are configured, the service
@@ -523,15 +551,20 @@ exports traces and logs. Each cycle is wrapped in a `sync-run` span with
 attributes for namespace/secret counts, successes, errors, failed namespaces,
 duration and whether the namespace listing succeeded; child spans cover each
 source `beginCycle`/`fetchSecret`/`endCycle` and every Kubernetes API call.
+Spans are parented explicitly by argument, and while a span is active the work
+under it runs in that span's context, so log records emitted inside it carry
+the active `traceId`/`spanId` and can be correlated with the trace.
 HTTP requests under `/api` are traced with `@devopsplaybook.io/otel-utils-fastify`
 server spans; `/api/status` is excluded to keep probe traffic out of the
 traces, and unmatched routes use a bounded span name. No custom metrics are
 emitted: the Fastify plugin is registered without a meter.
 
-On `SIGTERM`/`SIGINT` the service stops scheduling, waits for the in-flight
-sync to finish and shuts the logger, tracer and meter down before exiting, so
-buffered telemetry is flushed. In job mode the same shutdown happens before
-`process.exit`.
+On `SIGTERM`/`SIGINT` the service drains the in-flight sync for up to
+`SHUTDOWN_GRACE_PERIOD_SECONDS` and shuts the logger, tracer and meter down
+before exiting, so buffered telemetry is flushed. Deployment mode exits `0`
+after stopping the scheduler and closing the API. Job mode installs the
+handlers before the run and exits `143`/`130` on a signal; a completed run
+exits `0`/`1`.
 
 Run a **single replica**. Overlap protection (`noOverlap` plus a single-flight
 runner) only applies inside one process; two replicas would write the same
@@ -634,7 +667,7 @@ a hot reload, or a failed configuration reload). It also reports the last sync:
 {
   "status": "ok",
   "service": "kubernetes-secrets-cloud-sync",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "mode": "deployment",
   "running": true,
   "uptimeSeconds": 12,
@@ -935,6 +968,33 @@ Keep the loopback default and use `exec` probes (or the image `HEALTHCHECK`)
 when no Service or remote trigger is needed. Never publish this Deployment
 through an Ingress or a LoadBalancer Service.
 
+### Upgrade notes (0.15.0)
+
+- **Job mode handles signals.** `SIGTERM`/`SIGINT` handlers are installed before
+  the single run, so an eviction during a job drains the in-flight cycle for up
+  to `SHUTDOWN_GRACE_PERIOD_SECONDS`, flushes telemetry and exits `143`
+  (`SIGTERM`) or `130` (`SIGINT`). A completed run keeps the `0`/`1` exit-code
+  policy; job manifests that treated any non-zero exit as success must be
+  reviewed.
+- **Logs correlate with traces.** Work under a span runs in that span's context,
+  so log records emitted during a cycle carry the active `traceId`/`spanId`.
+  Spans are still parented by argument. No custom metric was added.
+- **Provider payload behavior is documented and tested, not changed.** AWS still
+  stores non-JSON text under `value`, Alibaba and Restic still require a JSON
+  object; see the provider payload matrix above.
+- **The Alibaba SDK typings are no longer hand-declared.** `declarations.d.ts`
+  was removed and the build uses the types shipped by the SDK packages, so an
+  incompatible SDK upgrade fails the build.
+- **Supply chain pinned.** The node base image and `restic` 0.18.1 image are
+  pinned by digest (restic comes from the official image instead of an apk
+  package), and the reusable workflows plus `actions/checkout` are pinned to
+  commit SHAs. Dependabot opens weekly update PRs for npm, Docker and GitHub
+  Actions; see [Supply chain pinning](#supply-chain-pinning).
+- **Dev dependency advisories reduced.** npm `overrides` for `glob`/`minimatch`
+  drop `npm audit` from 19 advisories (1 low, 18 moderate) to 5 low, all the
+  unfixable dev-only `deepmerge@4.3.1` advisory. `npm audit --omit=dev` stays
+  clean and is the blocking CI gate.
+
 ### Upgrade notes (0.14.0)
 
 - **`API_HOST` defaults to `127.0.0.1`** (class default and `config.json`).
@@ -954,12 +1014,14 @@ through an Ingress or a LoadBalancer Service.
 
 ### Container image and security hardening
 
-The `Dockerfile` builds in three stages: a builder compiles TypeScript, a
-dedicated stage installs production dependencies only (`npm ci --omit=dev`),
-and the runtime image copies those `node_modules` plus `dist`. The image
-contains no devDependencies (no Jest/TypeScript/SWC) and runs as the unprivileged
-`node` user (uid/gid 1000), with `/opt/app` owned by it. The `restic` CLI is
-installed in the runtime image.
+The `Dockerfile` builds in four stages: a builder compiles TypeScript, a
+dedicated stage installs production dependencies only (`npm ci --omit=dev`), a
+`restic` stage provides the CLI from the official `restic/restic:0.18.1` image,
+and the runtime image copies those `node_modules`, `dist` and the `restic`
+binary. Every `node:26-alpine` stage is pinned by digest, so the base OS and
+Node version only change when the digest is bumped. The image contains no
+devDependencies (no Jest/TypeScript/SWC) and runs as the unprivileged `node`
+user (uid/gid 1000), with `/opt/app` owned by it.
 
 The image defines a Docker `HEALTHCHECK` that calls `GET /api/status` on
 `127.0.0.1:${API_PORT:-8080}`, so an unreachable or `503 degraded` API reports
@@ -1005,6 +1067,38 @@ spec:
 With `readOnlyRootFilesystem: true` the `/tmp` `emptyDir` is required: restic
 writes its cache there, and the controller itself does not write to disk. The
 mounted `config.json` must be readable by uid/gid 1000 (mode `644` is fine).
+
+### Supply chain pinning
+
+The Docker base image and the restic image are pinned to multi-arch digests,
+and the reusable workflows plus `actions/checkout` are pinned to commit SHAs.
+Dependabot (`.github/dependabot.yml`) opens weekly pull requests for npm,
+Docker and GitHub Actions. If Dependabot cannot update a cross-repository
+reusable workflow (it may not follow branch-ref comments), refresh the pins
+manually:
+
+```bash
+# node:26-alpine digest
+token=$(curl -s 'https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/node:pull' | sed -E 's/.*"token":"([^"]+)".*/\1/')
+curl -sI -H "Authorization: Bearer $token" \
+  -H 'Accept: application/vnd.oci.image.index.v1+json' \
+  https://registry-1.docker.io/v2/library/node/manifests/26-alpine | grep -i docker-content-digest
+
+# restic/restic:0.18.1 digest (same pattern, repository:restic/restic:pull)
+# common-utils main commit used by the reusable workflows
+git ls-remote https://github.com/devopsplaybook-io/common-utils.git refs/heads/main
+```
+
+### Dependency security
+
+`npm audit --omit=dev` is the blocking CI gate and reports no vulnerabilities.
+The full audit (including devDependencies) reports 5 low advisories, all from
+`deepmerge@4.3.1` (GHSA-gcqx-w48m-w2h4), which is pulled in by the Jest
+coverage toolchain. 4.3.1 is the latest release and npm's only suggested fix is
+a breaking downgrade to Jest 29, so it stays; the advisories are dev-only and
+never ship in the image. The exact `glob`/`minimatch` overrides in
+`package.json` keep the rest of the Jest/SWC chain off the list — keep them
+exact when regenerating the lockfile.
 
 ## Development
 

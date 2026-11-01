@@ -1,4 +1,4 @@
-import { jobExitCode, main } from "./App";
+import { drainWithGrace, jobExitCode, main, signalExitCode } from "./App";
 import { SyncRunResult } from "./types";
 
 jest.mock("node-cron", () => {
@@ -73,6 +73,7 @@ jest.mock("./Config", () => {
     SYNC_CRON_SCHEDULE: "*/5 * * * *",
     JOB_MODE: false,
     SYNC_ALLOWED_PARTIAL_FAILURES: 0,
+    SHUTDOWN_GRACE_PERIOD_SECONDS: 15,
     API_PORT: 8080,
     API_HOST: "127.0.0.1",
     API_AUTH_TOKEN: "",
@@ -268,6 +269,35 @@ describe("jobExitCode", () => {
 
   it("passes when nothing was requested", () => {
     expect(jobExitCode(syncResult(), 0)).toBe(0);
+  });
+});
+
+describe("signalExitCode", () => {
+  it("exits 143 on SIGTERM", () => {
+    expect(signalExitCode("SIGTERM")).toBe(143);
+  });
+
+  it("exits 130 on SIGINT", () => {
+    expect(signalExitCode("SIGINT")).toBe(130);
+  });
+
+  it("falls back to 1 for other signals", () => {
+    expect(signalExitCode("SIGHUP")).toBe(1);
+  });
+});
+
+describe("drainWithGrace", () => {
+  it("resolves true when the run settles before the grace expires", async () => {
+    await expect(drainWithGrace(async () => undefined, 5)).resolves.toBe(true);
+  });
+
+  it("resolves false when the grace expires with a run still in flight", async () => {
+    jest.useFakeTimers();
+    const drained = drainWithGrace(() => new Promise<void>(() => undefined), 1);
+
+    await jest.advanceTimersByTimeAsync(1000);
+
+    await expect(drained).resolves.toBe(false);
   });
 });
 
@@ -533,6 +563,70 @@ describe("App main", () => {
       await main();
 
       expect(mockAssertSafeApiBinding).not.toHaveBeenCalled();
+    });
+
+    it("drains the in-flight run and exits 143 on SIGTERM", async () => {
+      let resolveRun!: (result: SyncRunResult) => void;
+      secretSyncInstance.runSync.mockReturnValueOnce(
+        new Promise<SyncRunResult>((resolve) => {
+          resolveRun = resolve;
+        }),
+      );
+      const { codes } = mockExit();
+      const onceSpy = jest.spyOn(process, "once");
+      const removeSpy = jest.spyOn(process, "removeListener");
+
+      const running = main();
+      await waitFor(() => secretSyncInstance.runSync.mock.calls.length === 1);
+
+      const sigtermCall = onceSpy.mock.calls.find(
+        ([signal]) => signal === "SIGTERM",
+      );
+      expect(sigtermCall).toBeDefined();
+      // The handler must be installed before the job starts, otherwise an
+      // eviction during the first cycle cannot be drained.
+      expect(onceSpy.mock.invocationCallOrder[0]).toBeLessThan(
+        secretSyncInstance.runSync.mock.invocationCallOrder[0],
+      );
+
+      (sigtermCall![1] as () => void)();
+      await flushPromises();
+
+      expect(codes).toEqual([]);
+      expect(standardLogger.shutdown).not.toHaveBeenCalled();
+
+      resolveRun(syncResult());
+      await running;
+
+      expect(codes).toEqual([143]);
+      expect(standardLogger.shutdown).toHaveBeenCalledTimes(1);
+      expect(removeSpy.mock.calls).toContainEqual(["SIGTERM", sigtermCall![1]]);
+    });
+
+    it("exits 130 on SIGINT during the run", async () => {
+      let resolveRun!: (result: SyncRunResult) => void;
+      secretSyncInstance.runSync.mockReturnValueOnce(
+        new Promise<SyncRunResult>((resolve) => {
+          resolveRun = resolve;
+        }),
+      );
+      const { codes } = mockExit();
+      const onceSpy = jest.spyOn(process, "once");
+
+      const running = main();
+      await waitFor(() => secretSyncInstance.runSync.mock.calls.length === 1);
+
+      const sigintCall = onceSpy.mock.calls.find(
+        ([signal]) => signal === "SIGINT",
+      );
+      expect(sigintCall).toBeDefined();
+      (sigintCall![1] as () => void)();
+
+      resolveRun(syncResult());
+      await running;
+
+      expect(codes).toEqual([130]);
+      expect(standardLogger.shutdown).toHaveBeenCalledTimes(1);
     });
   });
 

@@ -1,7 +1,7 @@
 import * as k8s from "@kubernetes/client-node";
 import type { Span } from "@opentelemetry/api";
 import { createHash } from "crypto";
-import { OTelEndSpan, OTelLogger, OTelStartSpan } from "./OTelContext";
+import { OTelEndSpan, OTelLogger, OTelStartSpan, OTelWithSpan } from "./OTelContext";
 import { Config } from "./Config";
 import { AnnotationEntry, NamespaceSyncRequest } from "./types";
 import {
@@ -146,12 +146,14 @@ export class KubernetesClient {
   ): Promise<NamespaceSyncRequest[]> {
     const span = OTelStartSpan("k8s-list-namespaces", undefined, parentSpan);
     try {
-      const nsList = await this.withRetry<k8s.V1NamespaceList>(
-        "list namespaces",
-        signal,
-        this.maxRetryAttempts,
-        (requestSignal) =>
-          this.k8sApi.listNamespace({}, this.buildRequestOptions(requestSignal)),
+      const nsList = await OTelWithSpan(span, () =>
+        this.withRetry<k8s.V1NamespaceList>(
+          "list namespaces",
+          signal,
+          this.maxRetryAttempts,
+          (requestSignal) =>
+            this.k8sApi.listNamespace({}, this.buildRequestOptions(requestSignal)),
+        ),
       );
       const requests: NamespaceSyncRequest[] = [];
 
@@ -326,15 +328,17 @@ export class KubernetesClient {
     const span = OTelStartSpan("k8s-list-secrets", undefined, parentSpan);
     try {
       const labelSelector = `${MANAGED_BY_LABEL}=${MANAGED_BY_VALUE},${INSTANCE_LABEL}=${this.instanceId}`;
-      const result = await this.withRetry<k8s.V1SecretList>(
-        "list secrets",
-        signal,
-        this.maxRetryAttempts,
-        (requestSignal) =>
-          this.k8sApi.listSecretForAllNamespaces(
-            { labelSelector },
-            this.buildRequestOptions(requestSignal),
-          ),
+      const result = await OTelWithSpan(span, () =>
+        this.withRetry<k8s.V1SecretList>(
+          "list secrets",
+          signal,
+          this.maxRetryAttempts,
+          (requestSignal) =>
+            this.k8sApi.listSecretForAllNamespaces(
+              { labelSelector },
+              this.buildRequestOptions(requestSignal),
+            ),
+        ),
       );
 
       const managed: ManagedSecret[] = [];
@@ -372,15 +376,17 @@ export class KubernetesClient {
       parentSpan,
     );
     try {
-      await this.withRetry(
-        "delete secret",
-        signal,
-        this.maxRetryAttempts,
-        (requestSignal) =>
-          this.k8sApi.deleteNamespacedSecret(
-            { namespace, name },
-            this.buildRequestOptions(requestSignal),
-          ),
+      await OTelWithSpan(span, () =>
+        this.withRetry(
+          "delete secret",
+          signal,
+          this.maxRetryAttempts,
+          (requestSignal) =>
+            this.k8sApi.deleteNamespacedSecret(
+              { namespace, name },
+              this.buildRequestOptions(requestSignal),
+            ),
+        ),
       );
       OTelEndSpan(span);
       logger.info(`Deleted orphaned secret: ${namespace}/${name}`);
@@ -673,10 +679,12 @@ export class KubernetesClient {
     );
     try {
       // Creates are not idempotent: never retried, even on 429/5xx.
-      await this.withRetry("create secret", signal, 1, (requestSignal) =>
-        this.k8sApi.createNamespacedSecret(
-          { namespace, body },
-          this.buildRequestOptions(requestSignal),
+      await OTelWithSpan(span, () =>
+        this.withRetry("create secret", signal, 1, (requestSignal) =>
+          this.k8sApi.createNamespacedSecret(
+            { namespace, body },
+            this.buildRequestOptions(requestSignal),
+          ),
         ),
       );
       OTelEndSpan(span);
@@ -699,15 +707,17 @@ export class KubernetesClient {
       parentSpan,
     );
     try {
-      await this.withRetry(
-        "patch secret",
-        signal,
-        this.maxRetryAttempts,
-        (requestSignal) =>
-          this.k8sApi.patchNamespacedSecret(
-            { name: k8sSecretName, namespace, body },
-            this.buildRequestOptions(requestSignal),
-          ),
+      await OTelWithSpan(span, () =>
+        this.withRetry(
+          "patch secret",
+          signal,
+          this.maxRetryAttempts,
+          (requestSignal) =>
+            this.k8sApi.patchNamespacedSecret(
+              { name: k8sSecretName, namespace, body },
+              this.buildRequestOptions(requestSignal),
+            ),
+        ),
       );
       OTelEndSpan(span);
     } catch (error) {
@@ -766,15 +776,17 @@ export class KubernetesClient {
       parentSpan,
     );
     try {
-      const secret = await this.withRetry<k8s.V1Secret>(
-        "read secret",
-        signal,
-        this.maxRetryAttempts,
-        (requestSignal) =>
-          this.k8sApi.readNamespacedSecret(
-            { name, namespace },
-            this.buildRequestOptions(requestSignal),
-          ),
+      const secret = await OTelWithSpan(span, () =>
+        this.withRetry<k8s.V1Secret>(
+          "read secret",
+          signal,
+          this.maxRetryAttempts,
+          (requestSignal) =>
+            this.k8sApi.readNamespacedSecret(
+              { name, namespace },
+              this.buildRequestOptions(requestSignal),
+            ),
+        ),
       );
       OTelEndSpan(span);
       return secret;

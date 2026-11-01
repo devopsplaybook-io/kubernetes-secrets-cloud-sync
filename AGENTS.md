@@ -9,22 +9,28 @@ A TypeScript service that syncs secrets from cloud providers (Alibaba Cloud KMS,
 ```
 kubernetes-secrets-cloud-sync/
   src/
-    App.ts                      # Entry point: startup, cron scheduling, source init
+    App.ts                      # Entry point: startup, cron scheduling, source init, signals
     Api.ts                      # HTTP API (status/manual sync) + in-memory SyncStatus
     Config.ts                   # Configuration loader (config.json + env vars)
+    Concurrency.ts              # Bounded concurrency helper (fetch/write fan-out)
     KubernetesClient.ts         # Kubernetes API: namespace scanning, secret CRUD
+    OTelContext.ts              # OpenTelemetry singleton (tracer, logger) + span helpers
+    Redaction.ts                # Restic output/config redaction helpers
+    SecretName.ts               # Secret name normalization, labels and instance id
     SecretSync.ts               # Sync orchestrator: ties sources + k8s client together
-    OTelContext.ts              # OpenTelemetry singleton (tracer, meter, logger)
+    SyncRunner.ts               # Single-flight runner shared by cron/API/initial run
     types.ts                    # Shared interfaces and type aliases
-    declarations.d.ts           # Type declarations for Alibaba Cloud SDKs
     sources/
       SecretSource.ts           # SecretSource interface + BaseSecretSource abstract class
       AlibabaKmsSource.ts       # Alibaba Cloud KMS implementation
       AwsSecretsManagerSource.ts# AWS Secrets Manager implementation
       ResticSource.ts           # Restic snapshot-based secret source
   config.json                   # Default runtime configuration
-  Dockerfile                    # Three-stage build (node:26-alpine + restic CLI, non-root)
+  Dockerfile                    # Four-stage build (digest-pinned node:26-alpine + restic binary, non-root)
 ```
+
+The Alibaba Cloud SDK packages ship their own `.d.ts` files; the project has no
+ambient module declarations, so an incompatible SDK API fails `npm run build`.
 
 ## Coding Conventions
 
@@ -128,23 +134,30 @@ ignored with a warning). The watcher is not installed in job mode.
 
 `SIGTERM`/`SIGINT` stop the scheduler, close the HTTP server, drain the
 in-flight run (`SingleFlightRunner.whenIdle`) bounded by
-`SHUTDOWN_GRACE_PERIOD_SECONDS`, shut down logger/tracer/meter, then exit. Job
-mode awaits the same shutdown before `process.exit`.
+`SHUTDOWN_GRACE_PERIOD_SECONDS`, shut down logger/tracer/meter, then exit `0`.
+Job mode installs the same handlers **before** the single run and, on a signal,
+drains, flushes telemetry and exits with the conventional signal code
+(`signalExitCode()`: `143` for `SIGTERM`, `130` for `SIGINT`); a completed run
+keeps the `0`/`1` policy. Both listeners are removed in a `finally` block.
 
 ### Observability
 
 `OTelStartSpan()`/`OTelEndSpan()` (`src/OTelContext.ts`) create explicit spans
-parented by argument (not by ambient context): one `sync-run` root span per
-cycle, plus `source-begin-cycle`, `source-fetch`, `source-end-cycle` and one
-span per Kubernetes API call. HTTP requests under `/api` get server spans from
-`@devopsplaybook.io/otel-utils-fastify` (registered without a meter);
-`GET /api/status` is excluded to keep probe noise out of traces. Do **not**
-add custom metrics. Restic output is sanitized by `src/Redaction.ts` before it
-reaches logs or errors: URL userinfo and the configured repository/password/
-`RESTIC_OPTIONS` literals are masked, and values of option flags whose name
-contains password/passwd/secret/token/key/credential/auth are masked too.
-`RESTIC_REPOSITORY`, `RESTIC_PASSWORD` and the whole `RESTIC_OPTIONS` string are
-masked in the config dump; `API_AUTH_TOKEN` is never logged.
+parented by argument: one `sync-run` root span per cycle, plus
+`source-begin-cycle`, `source-fetch`, `source-end-cycle` and one span per
+Kubernetes API call. `OTelWithSpan(span, fn)` runs the work of a span in its
+context (via `context.with(trace.setSpan(...))`), so log records emitted during
+that work carry the active `traceId`/`spanId` (log/trace correlation); spans are
+still parented explicitly, not by ambient context. HTTP requests under `/api`
+get server spans from `@devopsplaybook.io/otel-utils-fastify` (registered
+without a meter); `GET /api/status` is excluded to keep probe noise out of
+traces. Do **not** add custom metrics. Restic output is sanitized by
+`src/Redaction.ts` before it reaches logs or errors: URL userinfo and the
+configured repository/password/`RESTIC_OPTIONS` literals are masked, and values
+of option flags whose name contains password/passwd/secret/token/key/credential/
+auth are masked too. `RESTIC_REPOSITORY`, `RESTIC_PASSWORD` and the whole
+`RESTIC_OPTIONS` string are masked in the config dump; `API_AUTH_TOKEN` is never
+logged.
 
 ### Secret Naming
 
@@ -171,6 +184,14 @@ is a valid label value (<= 63 chars). `src/SecretName.ts` holds the pure helpers
 - AWS `SecretBinary` and Alibaba `secretDataType=binary` are stored base64 under
   the `binary` key; Alibaba KMS calls retry transient errors (3 attempts,
   exponential jitter).
+- Provider text payload behavior differs and is covered by tests; do not
+  "normalize" it without an explicit decision (it would break existing secrets
+  or hide malformed files). AWS stores non-JSON text and JSON scalars/arrays
+  verbatim under `value` and treats an empty `SecretString` as absent (unless
+  `SecretBinary` is present); Alibaba and Restic require a flat JSON object and
+  reject scalars, arrays and non-JSON text (Restic files are `<name>.json`).
+  The full matrix (binary, empty payloads, nested values, `null`, scalars,
+  1 MiB limit) is in the README under "Payload validation and binary secrets".
 - Restic resolves one snapshot per cycle (`restic snapshots --json`, filtered by
   the optional `RESTIC_HOST`/`RESTIC_TAG`/`RESTIC_SNAPSHOT_PATH`, newest by
   time) and streams each file with `restic dump <id> /<path>/<name>.json`; no
@@ -238,10 +259,14 @@ Boolean config values accept `true`, `"true"`, or `"1"` (string or boolean).
 
 ## Docker
 
-- Three-stage build on `node:26-alpine`: builder compiles TypeScript, a
-  `prod-deps` stage runs `npm ci --omit=dev`, and the runtime image copies only
-  `dist` + production `node_modules` (no devDependencies)
-- Runtime image installs the `restic` CLI and runs as `USER node` (uid/gid 1000)
+- Four-stage build: builder compiles TypeScript, a `prod-deps` stage runs
+  `npm ci --omit=dev`, a `restic` stage takes the binary from the pinned
+  `restic/restic:0.18.1` image, and the runtime image copies only `dist`,
+  production `node_modules` (no devDependencies) and `/usr/local/bin/restic`
+- Every `node:26-alpine` stage is pinned by digest, so the base OS and Node
+  version change only by bumping the digest (Dependabot does this weekly via
+  `.github/dependabot.yml`)
+- Runtime image runs as `USER node` (uid/gid 1000)
 - Docker `HEALTHCHECK` calls `GET /api/status` on `${API_PORT:-8080}`; skipped
   in job mode (`JOB_MODE`), which exits without listening. Kubernetes ignores
   image healthchecks and uses its own probes
@@ -259,7 +284,11 @@ npm audit --omit=dev # production dependencies must be vulnerability-free
 ```
 
 All four must pass. Add tests for new code paths, especially new secret source
-implementations and sync logic changes. CI also runs a pinned gitleaks scan
-(`secret-scan` job in `.github/workflows/pr-check.yml`) over the working tree;
-`.env`, `.env.*` and `*.env` files are git- and Docker-ignored and must never be
-committed.
+implementations and sync logic changes. `npm audit` (including dev
+dependencies) is expected to report only the 5 low `deepmerge@4.3.1` advisories
+from the Jest coverage toolchain, which has no fixed release; anything else —
+especially a production advisory — must be fixed, not documented. The exact
+`glob`/`minimatch` `overrides` in `package.json` are what keep the rest of the
+Jest/SWC chain clean. CI also runs a pinned gitleaks scan (`secret-scan` job in
+`.github/workflows/pr-check.yml`) over the working tree; `.env`, `.env.*` and
+`*.env` files are git- and Docker-ignored and must never be committed.

@@ -73,6 +73,20 @@ let shuttingDown = false;
 let registeredSignalHandlers: Array<[NodeJS.Signals, () => void]> = [];
 
 /**
+ * Exit-code policy for an interrupted job: match the conventional Node/Jest
+ * signal codes so an evicted job is never reported as a successful run.
+ */
+export function signalExitCode(signal: NodeJS.Signals): number {
+  if (signal === "SIGTERM") {
+    return 143;
+  }
+  if (signal === "SIGINT") {
+    return 130;
+  }
+  return 1;
+}
+
+/**
  * Exit-code policy for job mode: a run fails when the namespace listing
  * failed, when errors exceed the allowed threshold, or when nothing that was
  * requested could be fetched.
@@ -193,27 +207,62 @@ async function runJobMode(
 ): Promise<void> {
   logger.info("Job mode enabled. Running a single sync...");
 
-  let exitCode: 0 | 1;
-  try {
-    const result = await runner.run();
-    exitCode = jobExitCode(
-      result,
-      Number(config.SYNC_ALLOWED_PARTIAL_FAILURES),
-    );
-    const failed = result.failedNamespaces.length
-      ? result.failedNamespaces.join(",")
-      : "none";
-    logger.info(
-      `Job sync summary: ${result.namespaces} namespace(s), ${result.succeededSecrets}/${result.secrets} secret(s) synced, ${result.errors} error(s), failed namespaces: ${failed}, exit code ${exitCode}`,
-    );
-  } catch (error) {
-    logger.error("Sync failed", toError(error));
-    exitCode = 1;
-  }
+  // Install the handlers before the run so an eviction during the first (and
+  // only) cycle still drains and flushes telemetry.
+  let resolveSignal!: (signal: NodeJS.Signals) => void;
+  const signalled = new Promise<NodeJS.Signals>((resolve) => {
+    resolveSignal = resolve;
+  });
+  const onSigterm = () => resolveSignal("SIGTERM");
+  const onSigint = () => resolveSignal("SIGINT");
+  process.once("SIGTERM", onSigterm);
+  process.once("SIGINT", onSigint);
 
-  logger.info("Job mode enabled. Sync complete. Exiting...");
-  await shutdownTelemetry();
-  process.exit(exitCode);
+  try {
+    const outcome = await Promise.race([
+      runner.run().then(
+        (result) => ({ kind: "completed" as const, result }),
+        (error: unknown) => ({ kind: "failed" as const, error }),
+      ),
+      signalled.then((signal) => ({ kind: "signalled" as const, signal })),
+    ]);
+
+    if (outcome.kind === "signalled") {
+      logger.info(`Received ${outcome.signal} during the job, shutting down...`);
+      await drainWithGrace(
+        () => runner.whenIdle(),
+        Number(config.SHUTDOWN_GRACE_PERIOD_SECONDS),
+      );
+      await shutdownTelemetry();
+      process.exit(signalExitCode(outcome.signal));
+      return;
+    }
+
+    let exitCode: 0 | 1;
+    if (outcome.kind === "failed") {
+      logger.error("Sync failed", toError(outcome.error));
+      exitCode = 1;
+    } else {
+      const result = outcome.result;
+      exitCode = jobExitCode(
+        result,
+        Number(config.SYNC_ALLOWED_PARTIAL_FAILURES),
+      );
+      const failed = result.failedNamespaces.length
+        ? result.failedNamespaces.join(",")
+        : "none";
+      logger.info(
+        `Job sync summary: ${result.namespaces} namespace(s), ${result.succeededSecrets}/${result.secrets} secret(s) synced, ${result.errors} error(s), failed namespaces: ${failed}, exit code ${exitCode}`,
+      );
+    }
+
+    logger.info("Job mode enabled. Sync complete. Exiting...");
+    await shutdownTelemetry();
+    process.exit(exitCode);
+  } finally {
+    process.removeListener("SIGTERM", onSigterm);
+    process.removeListener("SIGINT", onSigint);
+  }
 }
 
 export async function main(): Promise<void> {

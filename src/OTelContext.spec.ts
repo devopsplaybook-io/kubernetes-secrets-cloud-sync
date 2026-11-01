@@ -1,9 +1,23 @@
-import { SpanKind, SpanStatusCode } from "@opentelemetry/api";
+import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
+import {
+  context,
+  Span,
+  SpanKind,
+  SpanStatusCode,
+  trace,
+} from "@opentelemetry/api";
+import {
+  InMemoryLogRecordExporter,
+  LoggerProvider,
+  SimpleLogRecordProcessor,
+} from "@opentelemetry/sdk-logs";
+import { ModuleLogger } from "@devopsplaybook.io/otel-utils";
 import {
   OTelEndSpan,
   OTelSetTracer,
   OTelStartSpan,
   OTelTracer,
+  OTelWithSpan,
   toError,
 } from "./OTelContext";
 
@@ -98,6 +112,62 @@ describe("OTelContext span helpers", () => {
       code: SpanStatusCode.ERROR,
       message: "nope",
     });
+  });
+});
+
+describe("OTelWithSpan", () => {
+  const traceId = "0123456789abcdef0123456789abcdef";
+  const spanId = "0123456789abcdef";
+  let span: Span;
+
+  beforeAll(() => {
+    // Same context manager StandardTracer registers at startup.
+    context.setGlobalContextManager(new AsyncLocalStorageContextManager());
+  });
+
+  beforeEach(() => {
+    span = trace.wrapSpanContext({ traceId, spanId, traceFlags: 1 });
+  });
+
+  it("activates the span while the callback runs and restores it afterwards", () => {
+    expect(trace.getSpan(context.active())).toBeUndefined();
+
+    const active = OTelWithSpan(span, () => trace.getSpan(context.active()));
+
+    expect(active).toBe(span);
+    expect(trace.getSpan(context.active())).toBeUndefined();
+  });
+
+  it("keeps the span active across await", async () => {
+    const active = await OTelWithSpan(span, async () => {
+      await Promise.resolve();
+      return trace.getSpan(context.active());
+    });
+
+    expect(active).toBe(span);
+  });
+
+  it("runs the callback unchanged without a span", () => {
+    expect(OTelWithSpan(undefined, () => 42)).toBe(42);
+  });
+
+  it("adds the active trace and span ids to logs emitted inside the span", () => {
+    const exporter = new InMemoryLogRecordExporter();
+    const provider = new LoggerProvider({
+      processors: [new SimpleLogRecordProcessor({ exporter })],
+    });
+    const logger = new ModuleLogger("spec", {
+      getLogger: () => provider.getLogger("spec"),
+    });
+
+    logger.info("outside the span");
+    OTelWithSpan(span, () => logger.info("inside the span"));
+
+    const records = exporter.getFinishedLogRecords();
+    expect(records).toHaveLength(2);
+    expect(records[0].spanContext).toBeUndefined();
+    expect(records[1].spanContext?.traceId).toBe(traceId);
+    expect(records[1].spanContext?.spanId).toBe(spanId);
   });
 });
 

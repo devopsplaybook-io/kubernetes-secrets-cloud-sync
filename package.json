@@ -1,6 +1,6 @@
 {
   "name": "kubernetes-secrets-cloud-sync",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "author": "",
   "license": "MIT",
   "engines": {
@@ -30,6 +30,8 @@
     "node-cron": "^4.6.0"
   },
   "devDependencies": {
+    "@opentelemetry/context-async-hooks": "^3.0.0",
+    "@opentelemetry/sdk-logs": "^3.0.0",
     "@swc/core": "^1.16.21",
     "@swc/jest": "^0.2.39",
     "@types/fs-extra": "^11.0.4",
@@ -39,5 +41,9 @@
     "oxlint": "^1.90.0",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
+  },
+  "overrides": {
+    "glob": "14.0.3",
+    "minimatch": "11.0.3"
   }
 }

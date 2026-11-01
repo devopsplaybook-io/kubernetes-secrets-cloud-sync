@@ -142,6 +142,44 @@ describe("AwsSecretsManagerSource", () => {
     expect(result.data).toEqual({ value: "[1,2,3]" });
   });
 
+  it.each(["null", "42", "true", '"x"'])(
+    "stores the JSON scalar %p verbatim under the value key",
+    async (secretString) => {
+      mockSend.mockResolvedValue({ SecretString: secretString });
+
+      const result = await source.fetchSecret("scalar");
+
+      expect(result.data).toEqual({ value: secretString });
+    },
+  );
+
+  it("accepts an empty JSON object with zero data keys", async () => {
+    mockSend.mockResolvedValue({ SecretString: "{}" });
+
+    const result = await source.fetchSecret("empty-object");
+
+    expect(result.data).toEqual({});
+  });
+
+  it("treats an empty SecretString as absent", async () => {
+    mockSend.mockResolvedValue({ SecretString: "" });
+
+    await expect(source.fetchSecret("empty-string")).rejects.toThrow(
+      "No secret data returned for secret: empty-string",
+    );
+  });
+
+  it("prefers SecretBinary when SecretString is empty", async () => {
+    const binary = new Uint8Array([0x01, 0x02]);
+    mockSend.mockResolvedValue({ SecretString: "", SecretBinary: binary });
+
+    const result = await source.fetchSecret("binary-over-empty-text");
+
+    expect(result.data).toEqual({
+      binary: Buffer.from(binary).toString("base64"),
+    });
+  });
+
   it("rejects a nested object payload", async () => {
     mockSend.mockResolvedValue({
       SecretString: JSON.stringify({ a: { b: 1 } }),
