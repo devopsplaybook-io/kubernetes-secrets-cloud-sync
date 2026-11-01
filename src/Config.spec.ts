@@ -32,6 +32,11 @@ describe("Config", () => {
     delete process.env.SYNC_ALLOWED_PARTIAL_FAILURES;
     delete process.env.RESTIC_REPOSITORY;
     delete process.env.RESTIC_PASSWORD;
+    delete process.env.RESTIC_HOST;
+    delete process.env.RESTIC_TAG;
+    delete process.env.RESTIC_SNAPSHOT_PATH;
+    delete process.env.RESTIC_MAX_SNAPSHOT_AGE_SECONDS;
+    delete process.env.RESTIC_MAX_OUTPUT_BYTES;
     delete process.env.API_PORT;
     delete process.env.API_HOST;
   });
@@ -71,6 +76,11 @@ describe("Config", () => {
       expect(config.ORPHAN_CLEANUP_MAX_DELETIONS).toBe(50);
       expect(config.RESTIC_TIMEOUT_SECONDS).toBe(120);
       expect(config.RESTIC_RETRIES).toBe(2);
+      expect(config.RESTIC_HOST).toBe("");
+      expect(config.RESTIC_TAG).toBe("");
+      expect(config.RESTIC_SNAPSHOT_PATH).toBe("");
+      expect(config.RESTIC_MAX_SNAPSHOT_AGE_SECONDS).toBe(172800);
+      expect(config.RESTIC_MAX_OUTPUT_BYTES).toBe(8388608);
       expect(config.SYNC_FETCH_CONCURRENCY).toBe(4);
       expect(config.SYNC_WRITE_CONCURRENCY).toBe(4);
       expect(config.SYNC_ALLOWED_PARTIAL_FAILURES).toBe(0);
@@ -208,6 +218,65 @@ describe("Config", () => {
       expect(config.RESTIC_RETRIES).toBe(0);
       expect(config.SYNC_FETCH_CONCURRENCY).toBe(8);
       expect(config.SYNC_WRITE_CONCURRENCY).toBe(6);
+    });
+
+    it("should load restic snapshot filter settings from config.json", async () => {
+      mockReadJson.mockResolvedValue({
+        RESTIC_HOST: "backup-host",
+        RESTIC_TAG: "daily",
+        RESTIC_SNAPSHOT_PATH: "/srv/secrets",
+      });
+
+      const config = new Config();
+      await config.reload();
+
+      expect(config.RESTIC_HOST).toBe("backup-host");
+      expect(config.RESTIC_TAG).toBe("daily");
+      expect(config.RESTIC_SNAPSHOT_PATH).toBe("/srv/secrets");
+    });
+
+    it("should let environment variables override restic snapshot filter settings", async () => {
+      process.env.RESTIC_HOST = "env-host";
+      process.env.RESTIC_TAG = "env-tag";
+      process.env.RESTIC_SNAPSHOT_PATH = "/env/path";
+      mockReadJson.mockResolvedValue({
+        RESTIC_HOST: "config-host",
+        RESTIC_TAG: "config-tag",
+        RESTIC_SNAPSHOT_PATH: "/config/path",
+      });
+
+      const config = new Config();
+      await config.reload();
+
+      expect(config.RESTIC_HOST).toBe("env-host");
+      expect(config.RESTIC_TAG).toBe("env-tag");
+      expect(config.RESTIC_SNAPSHOT_PATH).toBe("/env/path");
+    });
+
+    it("should accept 0 for the snapshot maximum age and clamp above the maximum", async () => {
+      mockReadJson.mockResolvedValue({ RESTIC_MAX_SNAPSHOT_AGE_SECONDS: 0 });
+      const config = new Config();
+      await config.reload();
+      expect(config.RESTIC_MAX_SNAPSHOT_AGE_SECONDS).toBe(0);
+
+      process.env.RESTIC_MAX_SNAPSHOT_AGE_SECONDS = "31536001";
+      await config.reload();
+      expect(config.RESTIC_MAX_SNAPSHOT_AGE_SECONDS).toBe(31536000);
+    });
+
+    it("should bound the restic output limit and fall back on invalid values", async () => {
+      mockReadJson.mockResolvedValue({ RESTIC_MAX_OUTPUT_BYTES: 1024 });
+      const config = new Config();
+      await config.reload();
+      expect(config.RESTIC_MAX_OUTPUT_BYTES).toBe(8388608);
+
+      process.env.RESTIC_MAX_OUTPUT_BYTES = "999999999";
+      await config.reload();
+      expect(config.RESTIC_MAX_OUTPUT_BYTES).toBe(268435456);
+
+      process.env.RESTIC_MAX_OUTPUT_BYTES = "garbage";
+      await config.reload();
+      expect(config.RESTIC_MAX_OUTPUT_BYTES).toBe(8388608);
     });
 
     it("should let environment variables override restic and concurrency settings", async () => {

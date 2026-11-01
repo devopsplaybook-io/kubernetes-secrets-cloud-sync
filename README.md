@@ -168,23 +168,66 @@ The architecture is designed to be extensible. Additional providers can be added
 
 ### Restic Provider
 
-Each sync cycle resolves the **newest snapshot** of the configured restic
-repository once (`restic snapshots --json`), then streams every requested
+Each sync cycle resolves the **newest matching snapshot** of the configured
+restic repository once (`restic snapshots --json`), then streams every requested
 `<secret-name>.json` file (optionally under `RESTIC_PATH`) from that snapshot
 with `restic dump`. Every unique secret is fetched once per cycle, all secrets
 of a cycle come from the same snapshot, no full-snapshot restore is performed
 and no plaintext copy is written to disk. Each file must contain a flat JSON
 object whose keys/values become the Kubernetes Secret entries.
 
+Snapshot selection can be narrowed with the optional `RESTIC_HOST`, `RESTIC_TAG`
+and `RESTIC_SNAPSHOT_PATH` filters (passed to `restic snapshots` as `--host`,
+`--tag` and `--path`). Empty filters keep the default behaviour: the newest
+snapshot of the whole repository. `RESTIC_SNAPSHOT_PATH` filters *snapshots* by
+backed-up path and is unrelated to `RESTIC_PATH`, which selects the folder
+inside a snapshot used by `dump`.
+
+The resolved snapshot must not be older than `RESTIC_MAX_SNAPSHOT_AGE_SECONDS`
+(default `172800`, i.e. 48 hours; `0` disables the guard). When the newest
+matching snapshot is older, or its time cannot be parsed, the restic source
+fails for the cycle: no stale Secret is written, the error names the snapshot
+and its age, and job mode exits non-zero. This is fail-closed by design, so a
+broken backup becomes visible instead of silently re-applying old data.
+
 Secret names and `RESTIC_PATH` are validated before any restic invocation:
 only letters, digits, `.`, `_`, `-` and `/` are accepted, and leading/trailing
 slashes, empty segments and `..` segments are rejected (they could otherwise
 escape the expected path or turn into glob patterns).
 
-Every restic invocation is bounded by `RESTIC_TIMEOUT_SECONDS` (default `120`)
-and killed with `SIGKILL` when it exceeds it. Transient failures are retried
-`RESTIC_RETRIES` times (default `2`) with exponential backoff; a missing
-`restic` binary and invalid names are not retried.
+Every restic invocation is bounded by `RESTIC_TIMEOUT_SECONDS` (default `120`).
+The process runs in its own process group, and the **whole group** is killed
+with `SIGKILL` on timeout or cycle abort, so helper processes started by restic
+(e.g. `rclone`) do not survive. Output is decoded as streamed UTF-8 (multi-byte
+characters split across chunks are preserved) and capped at
+`RESTIC_MAX_OUTPUT_BYTES` per stream (default 8 MiB); exceeding it fails the
+invocation without buffering further. Only transient failures are retried
+`RESTIC_RETRIES` times (default `2`) with exponential backoff: timeouts,
+repository lock failures (exit 11), temporary spawn errors and network-style
+stderr messages. Authentication, configuration and usage errors (wrong
+password, missing repository, access denied, invalid arguments, unknown exit
+codes) fail immediately. A missing `restic` binary and invalid names are not
+retried either.
+
+Per-secret `restic dump` is kept instead of a single
+`restic restore --include … --target <dir>`: a restore writes plaintext copies
+of every secret to the container filesystem (the `/tmp` emptyDir is disk-backed
+by default and `readOnlyRootFilesystem: true` only protects the rest of the
+root filesystem), and cleanup can be lost on `SIGKILL`/OOM, leaving secrets
+behind. That tradeoff outweighs the speedup for this controller, which
+deliberately never writes plaintext to disk. Per-cycle caching adds nothing
+because each unique `(provider, secret)` is already fetched once per cycle.
+Measured against the 2026-11-01 live baseline (13 namespaces, 47 unique
+fetches/80 references, 124,314 ms per cycle for 1 `snapshots` + 47 `dump`
+invocations), the design still costs one restic invocation per unique secret;
+a local benchmark of 48 sequential `spawnSync` calls took ≈63 ms in total
+(≈1.3 ms per process), so process startup is negligible and the cycle time is
+dominated by restic opening the repository and index per invocation. The
+alternative is not implemented and no unmeasured speedup is claimed.
+
+Alerting tip: because a stale snapshot fails the cycle, alert on the sync job
+result *and* on the age of the newest snapshot. Job success alone is not
+sufficient to prove that fresh data was applied.
 
 Example file `feedwatcher.json` inside the restic snapshot:
 
@@ -302,6 +345,11 @@ Configuration can be set via `config.json` or environment variables:
 | `RESTIC_PASSWORD`                      |                                       | Restic repository password                   |
 | `RESTIC_PATH`                          |                                       | Optional sub-folder inside the snapshot      |
 | `RESTIC_OPTIONS`                       |                                       | Extra CLI args appended to every restic call |
+| `RESTIC_HOST`                          |                                       | Only snapshots of this host (`--host`)       |
+| `RESTIC_TAG`                           |                                       | Only snapshots with this tag (`--tag`)       |
+| `RESTIC_SNAPSHOT_PATH`                 |                                       | Only snapshots of this path (`--path`)       |
+| `RESTIC_MAX_SNAPSHOT_AGE_SECONDS`      | `172800`                              | Max age of the newest snapshot; `0` disables |
+| `RESTIC_MAX_OUTPUT_BYTES`              | `8388608`                             | Max stdout/stderr bytes per invocation       |
 | `RESTIC_TIMEOUT_SECONDS`               | `120`                                 | Per-invocation restic timeout (SIGKILL)      |
 | `RESTIC_RETRIES`                       | `2`                                   | Retries for transient restic failures        |
 | `LOG_LEVEL`                            | `info`                                | Log level                                    |
@@ -324,6 +372,8 @@ Applied on the next cycle without a restart:
   `SYNC_ALLOWED_PARTIAL_FAILURES`, `SYNC_CYCLE_TIMEOUT_SECONDS`,
   `SHUTDOWN_GRACE_PERIOD_SECONDS`;
 - `RESTIC_REPOSITORY`, `RESTIC_PASSWORD`, `RESTIC_PATH`, `RESTIC_OPTIONS`,
+  `RESTIC_HOST`, `RESTIC_TAG`, `RESTIC_SNAPSHOT_PATH`,
+  `RESTIC_MAX_SNAPSHOT_AGE_SECONDS`, `RESTIC_MAX_OUTPUT_BYTES`,
   `RESTIC_TIMEOUT_SECONDS`, `RESTIC_RETRIES`.
 
 Restart-only settings (`JOB_MODE`, `ANNOTATION_PREFIX`, `SECRET_NAME_PREFIX`,

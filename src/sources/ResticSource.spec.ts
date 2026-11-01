@@ -66,6 +66,7 @@ function completeDump(value: unknown, childIndex?: number): void {
 describe("ResticSource", () => {
   let config: Config;
   let source: ResticSource;
+  let killSpy: jest.SpyInstance;
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -74,12 +75,20 @@ describe("ResticSource", () => {
     config.RESTIC_PASSWORD = "restic-pass";
     config.RESTIC_PATH = "secrets/";
     config.RESTIC_OPTIONS = "";
+    config.RESTIC_HOST = "";
+    config.RESTIC_TAG = "";
+    config.RESTIC_SNAPSHOT_PATH = "";
+    config.RESTIC_MAX_SNAPSHOT_AGE_SECONDS = 0;
+    config.RESTIC_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
     config.RESTIC_TIMEOUT_SECONDS = 120;
     config.RESTIC_RETRIES = 0;
+    // Never signal a real process group from the mocked child pid (12345).
+    killSpy = jest.spyOn(process, "kill").mockReturnValue(true);
     source = new ResticSource(config);
   });
 
   afterEach(() => {
+    killSpy.mockRestore();
     jest.useRealTimers();
   });
 
@@ -344,6 +353,98 @@ describe("ResticSource", () => {
     });
   });
 
+  describe("snapshot filters", () => {
+    it("passes host, tag and path filters to restic snapshots", async () => {
+      config.RESTIC_HOST = " backup-host ";
+      config.RESTIC_TAG = "daily";
+      config.RESTIC_SNAPSHOT_PATH = "/srv/secrets";
+
+      const cycle = source.beginCycle(["name-a"]);
+      completeSnapshotResolution([
+        { id: "snap-1", time: "2026-10-22T06:00:00Z" },
+      ]);
+      await cycle;
+
+      expect(spawn.mock.calls[0][1]).toEqual([
+        "snapshots",
+        "--json",
+        "--host=backup-host",
+        "--tag=daily",
+        "--path=/srv/secrets",
+      ]);
+    });
+
+    it("omits empty filters", async () => {
+      config.RESTIC_HOST = "   ";
+      config.RESTIC_TAG = "";
+      config.RESTIC_SNAPSHOT_PATH = "";
+
+      const cycle = source.beginCycle(["name-a"]);
+      completeSnapshotResolution([
+        { id: "snap-1", time: "2026-10-22T06:00:00Z" },
+      ]);
+      await cycle;
+
+      expect(spawn.mock.calls[0][1]).toEqual(["snapshots", "--json"]);
+    });
+  });
+
+  describe("snapshot freshness", () => {
+    beforeEach(() => {
+      config.RESTIC_MAX_SNAPSHOT_AGE_SECONDS = 172800;
+    });
+
+    it("fails the cycle when the newest snapshot is too old", async () => {
+      const cycle = source.beginCycle(["name-a"]);
+      completeSnapshotResolution([
+        { id: "stale", time: "2026-10-01T00:00:00Z" },
+      ]);
+      await cycle;
+
+      await expect(source.fetchSecret("name-a")).rejects.toThrow(
+        /is \d+s old, above RESTIC_MAX_SNAPSHOT_AGE_SECONDS=172800; refusing to apply stale secrets/,
+      );
+      // No dump is spawned for a stale snapshot.
+      expect(spawn).toHaveBeenCalledTimes(1);
+    });
+
+    it("accepts a snapshot within the configured maximum age", async () => {
+      const cycle = source.beginCycle(["name-a"]);
+      completeSnapshotResolution([
+        { id: "fresh", time: new Date(Date.now() - 60_000).toISOString() },
+      ]);
+      await cycle;
+
+      const fetch = source.fetchSecret("name-a");
+      completeDump({ key: "value" });
+      await expect(fetch).resolves.toMatchObject({ secretName: "name-a" });
+    });
+
+    it("treats a maximum age of 0 as disabled", async () => {
+      config.RESTIC_MAX_SNAPSHOT_AGE_SECONDS = 0;
+      const cycle = source.beginCycle(["name-a"]);
+      completeSnapshotResolution([
+        { id: "old", time: "2020-01-01T00:00:00Z" },
+      ]);
+      await cycle;
+
+      const fetch = source.fetchSecret("name-a");
+      completeDump({ key: "value" });
+      await expect(fetch).resolves.toMatchObject({ secretName: "name-a" });
+    });
+
+    it("fails when the snapshot time is unparseable and the guard is enabled", async () => {
+      const cycle = source.beginCycle(["name-a"]);
+      completeSnapshotResolution([{ id: "no-time" }]);
+      await cycle;
+
+      await expect(source.fetchSecret("name-a")).rejects.toThrow(
+        /no parseable time/,
+      );
+      expect(spawn).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe("fetchSecret", () => {
     it("uses restic dump and never restores the snapshot", async () => {
       const fetch = source.fetchSecret("feedwatcher");
@@ -357,6 +458,37 @@ describe("ResticSource", () => {
       expect(args).not.toContain("restore");
       expect(args).not.toContain("--include");
       expect(args).not.toContain("--target");
+    });
+
+    it("decodes a multi-byte UTF-8 character split across chunks", async () => {
+      const fetch = source.fetchSecret("name-a");
+      const child = spawnedChild();
+      const payload = Buffer.from(JSON.stringify({ k: "é" }));
+      const splitAt = payload.indexOf(Buffer.from("é")) + 1;
+      child.stdout.emit("data", payload.subarray(0, splitAt));
+      child.stdout.emit("data", payload.subarray(splitAt));
+      child.emit("close", 0);
+
+      const result = await fetch;
+      expect(result).toEqual({
+        provider: "restic",
+        secretName: "name-a",
+        data: { k: "é" },
+      });
+      expect(JSON.stringify(result.data)).not.toContain("\uFFFD");
+    });
+
+    it("decodes multi-byte UTF-8 stderr split across chunks", async () => {
+      const fetch = source.fetchSecret("name-a");
+      const child = spawnedChild();
+      const message = Buffer.from("échec de connexion");
+      child.stderr.emit("data", message.subarray(0, 1));
+      child.stderr.emit("data", message.subarray(1));
+      child.emit("close", 1);
+
+      const error = (await fetch.catch((err) => err)) as Error;
+      expect(error.message).toContain("échec de connexion");
+      expect(error.message).not.toContain("\uFFFD");
     });
 
     it("fails on invalid JSON", async () => {
@@ -420,16 +552,16 @@ describe("ResticSource", () => {
   });
 
   describe("timeout and retries", () => {
-    it("kills a hung restic invocation with SIGKILL", async () => {
+    it("kills the process group of a hung restic invocation with SIGKILL", async () => {
       jest.useFakeTimers();
       const fetch = source.fetchSecret("name-a");
-      const child = spawnedChild();
+      spawnedChild();
 
       jest.advanceTimersByTime(120_000);
       await expect(fetch).rejects.toThrow(
         "restic dump timed out after 120000ms",
       );
-      expect(child.kill).toHaveBeenCalledWith("SIGKILL");
+      expect(killSpy).toHaveBeenCalledWith(-12345, "SIGKILL");
     });
 
     it("retries a transient failure and then succeeds", async () => {
@@ -447,6 +579,132 @@ describe("ResticSource", () => {
 
       completeDump({ key: "value" });
       await expect(fetch).resolves.toMatchObject({ secretName: "name-a" });
+    });
+
+    it("retries a timed-out invocation", async () => {
+      jest.useFakeTimers();
+      config.RESTIC_RETRIES = 1;
+      const fetch = source.fetchSecret("name-a");
+
+      spawnedChild(0);
+      await jest.advanceTimersByTimeAsync(120_000);
+      await jest.advanceTimersByTimeAsync(1000);
+      expect(spawn).toHaveBeenCalledTimes(2);
+
+      completeDump({ key: "value" }, 1);
+      await expect(fetch).resolves.toMatchObject({ secretName: "name-a" });
+    });
+
+    it("retries a temporary spawn failure (EAGAIN)", async () => {
+      jest.useFakeTimers();
+      config.RESTIC_RETRIES = 1;
+      const fetch = source.fetchSecret("name-a");
+
+      const first = spawnedChild(0);
+      first.emit(
+        "error",
+        Object.assign(new Error("spawn restic EAGAIN"), { code: "EAGAIN" }),
+      );
+      await jest.advanceTimersByTimeAsync(1000);
+      expect(spawn).toHaveBeenCalledTimes(2);
+
+      completeDump({ key: "value" }, 1);
+      await expect(fetch).resolves.toMatchObject({ secretName: "name-a" });
+    });
+
+    it.each([
+      {
+        label: "exit 11 (lock failure)",
+        exitCode: 11,
+        stderr: "repository is already locked",
+        retried: true,
+      },
+      {
+        label: "exit 1 connection reset",
+        exitCode: 1,
+        stderr: "read tcp: connection reset by peer",
+        retried: true,
+      },
+      {
+        label: "exit 1 temporary failure",
+        exitCode: 1,
+        stderr: "temporary failure",
+        retried: true,
+      },
+      {
+        label: "exit 1 timeout",
+        exitCode: 1,
+        stderr: "context deadline: timed out",
+        retried: true,
+      },
+      {
+        label: "exit 12 wrong password",
+        exitCode: 12,
+        stderr: "wrong password or no key found",
+        retried: false,
+      },
+      {
+        label: "exit 10 missing repository",
+        exitCode: 10,
+        stderr: "repository does not exist",
+        retried: false,
+      },
+      {
+        label: "exit 1 Access Denied",
+        exitCode: 1,
+        stderr: "Access Denied",
+        retried: false,
+      },
+      {
+        label: "exit 1 invalid argument",
+        exitCode: 1,
+        stderr: "invalid argument",
+        retried: false,
+      },
+      {
+        label: "exit 1 unknown error",
+        exitCode: 1,
+        stderr: "something unexpected happened",
+        retried: false,
+      },
+      {
+        label: "exit 2 usage error",
+        exitCode: 2,
+        stderr: "unknown flag: --nope",
+        retried: false,
+      },
+      {
+        label: "exit 3 backend error",
+        exitCode: 3,
+        stderr: "backend error",
+        retried: false,
+      },
+    ])("$label -> retried=$retried", async ({ exitCode, stderr, retried }) => {
+      jest.useFakeTimers();
+      config.RESTIC_RETRIES = 1;
+      const outcome = source.fetchSecret("name-a").then(
+        () => ({ ok: true as const }),
+        (error: Error) => ({ ok: false as const, error }),
+      );
+
+      const first = spawnedChild(0);
+      first.stderr.emit("data", Buffer.from(stderr));
+      first.emit("close", exitCode);
+
+      await jest.advanceTimersByTimeAsync(0);
+      await jest.advanceTimersByTimeAsync(1000);
+
+      if (retried) {
+        expect(spawn).toHaveBeenCalledTimes(2);
+        completeDump({ key: "value" }, 1);
+        await expect(outcome).resolves.toEqual({ ok: true });
+      } else {
+        expect(spawn).toHaveBeenCalledTimes(1);
+        await expect(outcome).resolves.toMatchObject({
+          ok: false,
+          error: { message: expect.stringContaining("exited with code") },
+        });
+      }
     });
 
     it("does not retry when RESTIC_RETRIES is 0", async () => {
@@ -469,6 +727,64 @@ describe("ResticSource", () => {
       child.emit("error", error);
 
       await expect(fetch).rejects.toThrow("spawn restic ENOENT");
+      expect(spawn).toHaveBeenCalledTimes(1);
+    });
+
+    it("kills the process group when the cycle is aborted", async () => {
+      const controller = new AbortController();
+      const fetch = source.fetchSecret("name-a", {
+        signal: controller.signal,
+      });
+      spawnedChild();
+
+      controller.abort(new Error("cycle deadline"));
+
+      await expect(fetch).rejects.toThrow("cycle deadline");
+      expect(killSpy).toHaveBeenCalledWith(-12345, "SIGKILL");
+    });
+  });
+
+  describe("output limits", () => {
+    it("rejects oversized stdout and kills the process group", async () => {
+      config.RESTIC_MAX_OUTPUT_BYTES = 64;
+      config.RESTIC_RETRIES = 2;
+      const fetch = source.fetchSecret("name-a");
+      const child = spawnedChild();
+
+      child.stdout.emit("data", Buffer.alloc(65, 0x61));
+
+      await expect(fetch).rejects.toThrow(
+        "restic dump output exceeded the RESTIC_MAX_OUTPUT_BYTES limit of 64 bytes (stdout)",
+      );
+      expect(spawn).toHaveBeenCalledTimes(1);
+      expect(killSpy).toHaveBeenCalledWith(-12345, "SIGKILL");
+    });
+
+    it("rejects oversized stderr and kills the process group", async () => {
+      config.RESTIC_MAX_OUTPUT_BYTES = 64;
+      config.RESTIC_RETRIES = 2;
+      const fetch = source.fetchSecret("name-a");
+      const child = spawnedChild();
+
+      child.stderr.emit("data", Buffer.alloc(65, 0x62));
+
+      await expect(fetch).rejects.toThrow(
+        "restic dump output exceeded the RESTIC_MAX_OUTPUT_BYTES limit of 64 bytes (stderr)",
+      );
+      expect(spawn).toHaveBeenCalledTimes(1);
+      expect(killSpy).toHaveBeenCalledWith(-12345, "SIGKILL");
+    });
+
+    it("ignores later chunks after the output limit was exceeded", async () => {
+      config.RESTIC_MAX_OUTPUT_BYTES = 64;
+      const fetch = source.fetchSecret("name-a");
+      const child = spawnedChild();
+
+      child.stdout.emit("data", Buffer.alloc(65, 0x61));
+      child.stdout.emit("data", Buffer.from("ignored"));
+      child.emit("close", 0);
+
+      await expect(fetch).rejects.toThrow("output exceeded");
       expect(spawn).toHaveBeenCalledTimes(1);
     });
   });

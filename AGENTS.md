@@ -159,13 +159,20 @@ is a valid label value (<= 63 chars). `src/SecretName.ts` holds the pure helpers
 - AWS `SecretBinary` and Alibaba `secretDataType=binary` are stored base64 under
   the `binary` key; Alibaba KMS calls retry transient errors (3 attempts,
   exponential jitter).
-- Restic resolves one snapshot per cycle (`restic snapshots --json`, newest by
+- Restic resolves one snapshot per cycle (`restic snapshots --json`, filtered by
+  the optional `RESTIC_HOST`/`RESTIC_TAG`/`RESTIC_SNAPSHOT_PATH`, newest by
   time) and streams each file with `restic dump <id> /<path>/<name>.json`; no
-  restore and no temporary plaintext files. Names and `RESTIC_PATH` are
-  validated (letters/digits/`.`, `_`, `-`, `/`; no `..`, empty segments or
-  leading/trailing slash). Invocations are killed with `SIGKILL` after
-  `RESTIC_TIMEOUT_SECONDS` and retried `RESTIC_RETRIES` times on transient
-  failures.
+  restore and no temporary plaintext files (per-secret dump is deliberate, see
+  README). The newest snapshot must be at most
+  `RESTIC_MAX_SNAPSHOT_AGE_SECONDS` old (default 48 h, `0` disables); otherwise
+  the restic source fails the cycle and no stale Secret is written. Names and
+  `RESTIC_PATH` are validated (letters/digits/`.`, `_`, `-`, `/`; no `..`,
+  empty segments or leading/trailing slash). stdout/stderr are decoded with a
+  streaming UTF-8 decoder and capped at `RESTIC_MAX_OUTPUT_BYTES` per stream.
+  Each invocation runs `detached` and the whole process group is killed with
+  `SIGKILL` after `RESTIC_TIMEOUT_SECONDS` or on abort. Only transient failures
+  (timeouts, exit 11 lock, transient spawn errors, network-style stderr) are
+  retried `RESTIC_RETRIES` times; auth/config/usage errors fail fast.
 
 ### Trust Model
 
@@ -203,8 +210,11 @@ Key configuration values:
 - `AWS_SECRETSMANAGER_REQUEST_TIMEOUT_MS` - AWS SDK request timeout (default: `30000`, restart-only)
 - `API_PORT` - HTTP API listen port, deployment mode only (default: `8080`, clamped 1-65535, restart-only)
 - `API_HOST` - HTTP API listen address (default: `0.0.0.0`, blank falls back to the default, restart-only)
-- `RESTIC_TIMEOUT_SECONDS` - per-invocation restic timeout, SIGKILL (default: `120`)
+- `RESTIC_TIMEOUT_SECONDS` - per-invocation restic timeout, whole process group killed (default: `120`)
 - `RESTIC_RETRIES` - transient restic failure retries (default: `2`)
+- `RESTIC_HOST` / `RESTIC_TAG` / `RESTIC_SNAPSHOT_PATH` - optional `restic snapshots` filters (default: empty = all snapshots). `RESTIC_SNAPSHOT_PATH` filters snapshots by backed-up path; `RESTIC_PATH` selects the folder inside a snapshot for `dump`
+- `RESTIC_MAX_SNAPSHOT_AGE_SECONDS` - newest snapshot must be younger than this; the restic source fails the cycle when stale (default: `172800` = 48 h, `0` disables)
+- `RESTIC_MAX_OUTPUT_BYTES` - per-stream stdout/stderr cap for one invocation (default: `8388608` = 8 MiB, clamped 65536-268435456)
 - Provider-specific: region, credentials for Alibaba KMS / AWS Secrets Manager / Restic
 
 Boolean config values accept `true`, `"true"`, or `"1"` (string or boolean).

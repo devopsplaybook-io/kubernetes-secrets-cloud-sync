@@ -82,6 +82,11 @@ export class Config implements ConfigOTelInterface {
   public RESTIC_PASSWORD = "";
   public RESTIC_PATH = "";
   public RESTIC_OPTIONS = "";
+  public RESTIC_HOST = "";
+  public RESTIC_TAG = "";
+  public RESTIC_SNAPSHOT_PATH = "";
+  public RESTIC_MAX_SNAPSHOT_AGE_SECONDS = 172800;
+  public RESTIC_MAX_OUTPUT_BYTES = 8388608;
   public RESTIC_TIMEOUT_SECONDS = 120;
   public RESTIC_RETRIES = 2;
 
@@ -206,6 +211,11 @@ export class Config implements ConfigOTelInterface {
     setIfSet("RESTIC_PASSWORD", false);
     setIfSet("RESTIC_PATH");
     setIfSet("RESTIC_OPTIONS");
+    setIfSet("RESTIC_HOST");
+    setIfSet("RESTIC_TAG");
+    setIfSet("RESTIC_SNAPSHOT_PATH");
+    setBoundedIntIfSet("RESTIC_MAX_SNAPSHOT_AGE_SECONDS", 172800, 0, 31536000);
+    setBoundedIntIfSet("RESTIC_MAX_OUTPUT_BYTES", 8388608, 65536, 268435456);
     setBoundedIntIfSet("RESTIC_TIMEOUT_SECONDS", 120, 1, 3600);
     setBoundedIntIfSet("RESTIC_RETRIES", 2, 0, 10);
   }
