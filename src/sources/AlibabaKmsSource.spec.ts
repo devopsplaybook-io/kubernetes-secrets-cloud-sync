@@ -141,6 +141,39 @@ describe("AlibabaKmsSource", () => {
     );
   });
 
+  it.each(["42", "null", "true", '"x"'])(
+    "rejects the JSON scalar %p",
+    async (secretData) => {
+      mockGetSecretValue.mockResolvedValue({
+        body: { secretDataType: "text", secretData },
+      });
+
+      await expect(source.fetchSecret("scalar")).rejects.toThrow(
+        "must be a JSON object",
+      );
+    },
+  );
+
+  it("accepts an empty JSON object with zero data keys", async () => {
+    mockGetSecretValue.mockResolvedValue({
+      body: { secretDataType: "text", secretData: "{}" },
+    });
+
+    const result = await source.fetchSecret("empty-object");
+
+    expect(result.data).toEqual({});
+  });
+
+  it("matches the binary data type case-insensitively and keeps the payload", async () => {
+    mockGetSecretValue.mockResolvedValue({
+      body: { secretDataType: "BINARY", secretData: "AAECAwQ=" },
+    });
+
+    const result = await source.fetchSecret("binary-upper");
+
+    expect(result.data).toEqual({ binary: "AAECAwQ=" });
+  });
+
   it("rejects a nested object payload", async () => {
     mockGetSecretValue.mockResolvedValue({
       body: { secretDataType: "text", secretData: '{"a":{"b":1}}' },

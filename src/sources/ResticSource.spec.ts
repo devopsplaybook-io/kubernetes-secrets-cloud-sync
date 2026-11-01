@@ -505,6 +505,41 @@ describe("ResticSource", () => {
       await expect(fetch).rejects.toThrow("must contain a JSON object");
     });
 
+    it.each([42, null, "text"])(
+      "rejects the JSON scalar %p",
+      async (payload) => {
+        const fetch = source.fetchSecret("scalar");
+        completeDump(payload);
+        await expect(fetch).rejects.toThrow("must contain a JSON object");
+      },
+    );
+
+    it("rejects a nested object value", async () => {
+      const fetch = source.fetchSecret("nested");
+      completeDump({ a: { b: 1 } });
+      await expect(fetch).rejects.toThrow("non-scalar");
+    });
+
+    it("stringifies numbers and booleans and skips null values", async () => {
+      const fetch = source.fetchSecret("mixed");
+      completeDump({ count: 3, enabled: true, missing: null });
+      await expect(fetch).resolves.toEqual({
+        provider: "restic",
+        secretName: "mixed",
+        data: { count: "3", enabled: "true" },
+      });
+    });
+
+    it("accepts an empty object with zero data keys", async () => {
+      const fetch = source.fetchSecret("empty");
+      completeDump({});
+      await expect(fetch).resolves.toEqual({
+        provider: "restic",
+        secretName: "empty",
+        data: {},
+      });
+    });
+
     it("fails without spawning when the source is not configured", async () => {
       config.RESTIC_PASSWORD = "";
       await expect(source.fetchSecret("name-a")).rejects.toThrow(
