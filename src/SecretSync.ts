@@ -3,7 +3,7 @@ import { mapWithConcurrency } from "./Concurrency";
 import type { Span } from "@opentelemetry/api";
 import { SecretSource } from "./sources/SecretSource";
 import { KubernetesClient, ManagedSecret } from "./KubernetesClient";
-import { OTelEndSpan, OTelLogger, OTelStartSpan, toError } from "./OTelContext";
+import { OTelEndSpan, OTelLogger, OTelStartSpan, OTelWithSpan, toError } from "./OTelContext";
 import { normalizeSecretName } from "./SecretName";
 import { SecretFetchResult, SyncRunResult } from "./types";
 
@@ -78,6 +78,13 @@ export class SecretSync {
   async runSync(): Promise<SyncRunResult> {
     const startedAt = Date.now();
     const rootSpan = OTelStartSpan("sync-run");
+    return OTelWithSpan(rootSpan, () => this.runCycle(startedAt, rootSpan));
+  }
+
+  private async runCycle(
+    startedAt: number,
+    rootSpan: Span | undefined,
+  ): Promise<SyncRunResult> {
     logger.info("Starting sync cycle");
 
     const cycleTimeoutSeconds = this.getCycleTimeoutSeconds();
@@ -246,7 +253,8 @@ export class SecretSync {
       try {
         for (const [provider, providerNames] of namesByProvider) {
           const source = this.sources.get(provider);
-          if (!source?.beginCycle) {
+          const beginCycle = source?.beginCycle;
+          if (!source || !beginCycle) {
             continue;
           }
           startedSources.set(provider, source);
@@ -256,7 +264,9 @@ export class SecretSync {
             rootSpan,
           );
           try {
-            await source.beginCycle([...providerNames], { signal });
+            await OTelWithSpan(beginSpan, () =>
+              beginCycle([...providerNames], { signal }),
+            );
             OTelEndSpan(beginSpan);
           } catch (error) {
             OTelEndSpan(beginSpan, error);
@@ -294,9 +304,9 @@ export class SecretSync {
               rootSpan,
             );
             try {
-              const result = await source.fetchSecret(request.secretName, {
-                signal,
-              });
+              const result = await OTelWithSpan(fetchSpan, () =>
+                source.fetchSecret(request.secretName, { signal }),
+              );
               fetchOutcomes.set(fetchKey, { ok: true, result });
               fetchSpan?.setAttribute("source.fetch.success", true);
               OTelEndSpan(fetchSpan);
@@ -391,7 +401,7 @@ export class SecretSync {
             rootSpan,
           );
           try {
-            await source.endCycle?.();
+            await OTelWithSpan(endSpan, () => source.endCycle?.());
             OTelEndSpan(endSpan);
           } catch (error) {
             OTelEndSpan(endSpan, error);

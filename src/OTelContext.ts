@@ -3,9 +3,11 @@ import {
   StandardTracer,
 } from "@devopsplaybook.io/otel-utils";
 import {
+  context,
   Span,
   SpanKind,
   SpanStatusCode,
+  trace,
 } from "@opentelemetry/api";
 
 let tracer: StandardTracer | undefined;
@@ -52,6 +54,19 @@ export function OTelStartSpan(
     }
   }
   return span;
+}
+
+/**
+ * Run `fn` with `span` as the active span, so logs emitted during the work
+ * carry its trace/span id. Spans stay parented explicitly by argument; this
+ * only activates the context for log correlation. Without a span (telemetry
+ * not initialized, tests) the callback runs unchanged.
+ */
+export function OTelWithSpan<T>(span: Span | undefined, fn: () => T): T {
+  if (!span) {
+    return fn();
+  }
+  return context.with(trace.setSpan(context.active(), span), fn);
 }
 
 /**
