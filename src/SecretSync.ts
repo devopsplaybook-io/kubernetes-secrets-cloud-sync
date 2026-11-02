@@ -253,7 +253,8 @@ export class SecretSync {
       try {
         for (const [provider, providerNames] of namesByProvider) {
           const source = this.sources.get(provider);
-          const beginCycle = source?.beginCycle;
+          // Bind the receiver: sources such as ResticSource keep per-cycle state on `this`.
+          const beginCycle = source?.beginCycle?.bind(source);
           if (!source || !beginCycle) {
             continue;
           }
@@ -283,8 +284,7 @@ export class SecretSync {
               }
             }
             logger.error(
-              `Secret source ${provider} beginCycle failed`,
-              toError(error),
+              `Secret source ${provider} beginCycle failed: ${toError(error).message}`,
             );
           }
         }

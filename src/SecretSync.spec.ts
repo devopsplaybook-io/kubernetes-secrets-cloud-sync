@@ -1170,6 +1170,44 @@ describe("SecretSync", () => {
       expect(mockSourceA.fetchSecret).not.toHaveBeenCalled();
     });
 
+    it("calls beginCycle with the source as its receiver", async () => {
+      mockGetNamespaceSyncRequests.mockResolvedValue([
+        {
+          namespace: "default",
+          annotations: [{ provider: "restic", secretNames: ["db"] }],
+        },
+      ]);
+
+      const source: Required<SecretSource> = {
+        providerName: "restic",
+        init: jest.fn(),
+        isAvailable: jest.fn().mockReturnValue(true),
+        beginCycle: jest.fn(async function (this: unknown) {
+          if (this !== source) {
+            throw new TypeError("beginCycle lost its receiver");
+          }
+        }),
+        endCycle: jest.fn(),
+        fetchSecret: jest.fn().mockResolvedValue({
+          provider: "restic",
+          secretName: "db",
+          data: { key: "value" },
+        }),
+      };
+
+      const sync = new SecretSync(
+        mockK8sClient as unknown as KubernetesClient,
+        [source],
+        createMockConfig() as Config,
+      );
+      const result = await sync.runSync();
+
+      expect(source.beginCycle).toHaveBeenCalledTimes(1);
+      expect(result.errors).toBe(0);
+      expect(result.failedNamespaces).toEqual([]);
+      expect(result.succeededSecrets).toBe(1);
+    });
+
     it("marks every namespace of a provider whose beginCycle failed", async () => {
       mockGetNamespaceSyncRequests.mockResolvedValue([
         {
