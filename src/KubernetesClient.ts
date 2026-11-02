@@ -992,16 +992,20 @@ export class KubernetesClient {
 
   private buildRequestOptions(
     signal?: AbortSignal,
-  ): k8s.ConfigurationOptions<k8s.Middleware> | undefined {
+  ): k8s.ConfigurationOptions<k8s.ObservableMiddleware> | undefined {
     if (!signal) {
       return undefined;
     }
-    const middleware: k8s.Middleware = {
-      pre: async (context: k8s.RequestContext) => {
+    // The client runs per-request middleware through its rxjs shim, which
+    // calls .toPromise() on the result: returning a bare Promise makes every
+    // request fail with "callback(...).toPromise is not a function".
+    const middleware: k8s.ObservableMiddleware = {
+      pre: (context: k8s.RequestContext) => {
         context.setSignal(signal);
-        return context;
+        return new k8s.Observable(Promise.resolve(context));
       },
-      post: async (context: k8s.ResponseContext) => context,
+      post: (context: k8s.ResponseContext) =>
+        new k8s.Observable(Promise.resolve(context)),
     };
     // Append keeps the kubeconfig authentication middleware in place.
     return { middleware: [middleware], middlewareMergeStrategy: "append" };

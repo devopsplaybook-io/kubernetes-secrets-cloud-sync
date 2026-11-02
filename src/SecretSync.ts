@@ -413,7 +413,10 @@ export class SecretSync {
       }
     } catch (error) {
       errors++;
-      logger.error(`Sync cycle failed during ${phase}`, toError(error));
+      logger.error(
+        `Sync cycle failed during ${phase}: ${toError(error).message}`,
+        toError(error),
+      );
     }
 
     const deleteOrphans = this.isTruthy(
