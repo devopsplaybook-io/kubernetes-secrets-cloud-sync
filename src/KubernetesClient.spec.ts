@@ -48,7 +48,21 @@ jest.mock("@kubernetes/client-node", () => {
       this.headers = headers;
     }
   }
-  return { KubeConfig: MockKubeConfig, CoreV1Api: {}, ApiException: MockApiException };
+  class MockObservable<T> {
+    constructor(private readonly promise: Promise<T>) {}
+    toPromise() {
+      return this.promise;
+    }
+    pipe<S>(callback: (value: T) => S | Promise<S>) {
+      return new MockObservable(this.promise.then(callback));
+    }
+  }
+  return {
+    KubeConfig: MockKubeConfig,
+    CoreV1Api: {},
+    ApiException: MockApiException,
+    Observable: MockObservable,
+  };
 });
 
 const { ApiException } = jest.requireMock("@kubernetes/client-node") as {
@@ -1026,6 +1040,30 @@ describe("KubernetesClient", () => {
 
       await expect(promise).rejects.toThrow("sync cycle deadline");
       expect(mockReadNamespacedSecret).toHaveBeenCalledTimes(1);
+    });
+
+    it("hands the client an Observable-based middleware for the abort signal", async () => {
+      mockListNamespace.mockResolvedValue({ items: [] });
+      const controller = new AbortController();
+
+      await client.getNamespaceSyncRequests(undefined, controller.signal);
+
+      const options = mockListNamespace.mock.calls[0][1];
+      expect(options.middlewareMergeStrategy).toBe("append");
+      const middleware =
+        options.middleware[options.middleware.length - 1];
+      const request = { setSignal: jest.fn() };
+      const preResult = middleware.pre(request);
+
+      // @kubernetes/client-node calls toPromise() on middleware results.
+      expect(typeof preResult.toPromise).toBe("function");
+      await expect(preResult.toPromise()).resolves.toBe(request);
+      expect(request.setSignal).toHaveBeenCalledWith(controller.signal);
+
+      const response = { httpStatusCode: 200 };
+      await expect(middleware.post(response).toPromise()).resolves.toBe(
+        response,
+      );
     });
   });
 
