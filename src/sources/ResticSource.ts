@@ -13,7 +13,13 @@ export const RESTIC_NAME_PATTERN = /^[A-Za-z0-9._/-]+$/;
 const RETRY_BASE_DELAY_MS = 500;
 const DEFAULT_TIMEOUT_SECONDS = 120;
 const DEFAULT_RETRIES = 2;
-const DEFAULT_MAX_SNAPSHOT_AGE_SECONDS = 172800;
+/**
+ * A fixed freshness window is off by default: restic snapshots are produced
+ * when secrets are pushed (not on a schedule), so the newest snapshot can
+ * legitimately be older than any fixed window between secret changes. The
+ * guard is opt-in for repositories written by a periodic backup pipeline.
+ */
+const DEFAULT_MAX_SNAPSHOT_AGE_SECONDS = 0;
 const DEFAULT_MAX_OUTPUT_BYTES = 8388608;
 
 /** Spawn failures worth retrying: the process table / file descriptors were temporarily exhausted. */
@@ -92,9 +98,10 @@ function classifyExitFailure(exitCode: number, stderr: string): boolean {
  * A sync cycle resolves the newest snapshot once (`restic snapshots --json`,
  * optionally filtered by host/tag/path) and every secret is streamed from that
  * snapshot with `restic dump` (`/<RESTIC_PATH>/<secretName>.json`). No
- * full-snapshot restore and no temporary plaintext files are involved. The
- * resolved snapshot must be newer than `RESTIC_MAX_SNAPSHOT_AGE_SECONDS`, and
- * restic output is bounded by `RESTIC_MAX_OUTPUT_BYTES` per stream.
+ * full-snapshot restore and no temporary plaintext files are involved. An
+ * optional `RESTIC_MAX_SNAPSHOT_AGE_SECONDS` guard (disabled by default) can
+ * refuse stale snapshots, and restic output is bounded by
+ * `RESTIC_MAX_OUTPUT_BYTES` per stream.
  *
  * Annotation key: secrets.cloudsync.devopsplaybook.io/restic
  * Annotation value: comma-separated list of secret names (each maps to
@@ -185,20 +192,19 @@ export class ResticSource extends BaseSecretSource {
 
       const snapshotTime = Date.parse(newest.time ?? "");
       const maxAgeSeconds = this.getMaxSnapshotAgeSeconds();
-      let ageDescription = "age not checked";
-      if (maxAgeSeconds > 0) {
-        if (!Number.isFinite(snapshotTime)) {
-          throw new Error(
-            `Newest restic snapshot ${newest.id} has no parseable time (${newest.time ?? "missing"}), so its freshness cannot be verified against RESTIC_MAX_SNAPSHOT_AGE_SECONDS=${maxAgeSeconds}; refusing to apply stale secrets`,
-          );
-        }
+      let ageDescription = "age unknown";
+      if (Number.isFinite(snapshotTime)) {
         const ageSeconds = Math.round((Date.now() - snapshotTime) / 1000);
-        if (ageSeconds > maxAgeSeconds) {
+        ageDescription = `age ${ageSeconds}s`;
+        if (maxAgeSeconds > 0 && ageSeconds > maxAgeSeconds) {
           throw new Error(
             `Newest restic snapshot ${newest.id} from ${newest.time} is ${ageSeconds}s old, above RESTIC_MAX_SNAPSHOT_AGE_SECONDS=${maxAgeSeconds}; refusing to apply stale secrets`,
           );
         }
-        ageDescription = `age ${ageSeconds}s`;
+      } else if (maxAgeSeconds > 0) {
+        throw new Error(
+          `Newest restic snapshot ${newest.id} has no parseable time (${newest.time ?? "missing"}), so its freshness cannot be verified against RESTIC_MAX_SNAPSHOT_AGE_SECONDS=${maxAgeSeconds}; refusing to apply stale secrets`,
+        );
       }
       this.snapshotId = newest.id;
       logger.info(
@@ -208,8 +214,7 @@ export class ResticSource extends BaseSecretSource {
       this.cycleError =
         error instanceof Error ? error : new Error(String(error));
       logger.error(
-        "Failed to resolve the restic snapshot; restic secrets will fail this cycle",
-        this.cycleError,
+        `Failed to resolve the restic snapshot; restic secrets will fail this cycle: ${this.sanitizeError(this.cycleError)}`,
       );
     }
   }

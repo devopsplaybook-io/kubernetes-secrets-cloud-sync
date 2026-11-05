@@ -88,7 +88,9 @@ export class Config implements ConfigOTelInterface {
   public RESTIC_HOST = "";
   public RESTIC_TAG = "";
   public RESTIC_SNAPSHOT_PATH = "";
-  public RESTIC_MAX_SNAPSHOT_AGE_SECONDS = 172800;
+  // Snapshots are produced when secrets are pushed, not on a schedule, so a
+  // fixed freshness window would fail between secret changes. Opt-in only.
+  public RESTIC_MAX_SNAPSHOT_AGE_SECONDS = 0;
   public RESTIC_MAX_OUTPUT_BYTES = 8388608;
   public RESTIC_TIMEOUT_SECONDS = 120;
   public RESTIC_RETRIES = 2;
@@ -234,7 +236,7 @@ export class Config implements ConfigOTelInterface {
     setIfSet("RESTIC_HOST");
     setIfSet("RESTIC_TAG");
     setIfSet("RESTIC_SNAPSHOT_PATH");
-    setBoundedIntIfSet("RESTIC_MAX_SNAPSHOT_AGE_SECONDS", 172800, 0, 31536000);
+    setBoundedIntIfSet("RESTIC_MAX_SNAPSHOT_AGE_SECONDS", 0, 0, 31536000);
     setBoundedIntIfSet("RESTIC_MAX_OUTPUT_BYTES", 8388608, 65536, 268435456);
     setBoundedIntIfSet("RESTIC_TIMEOUT_SECONDS", 120, 1, 3600);
     setBoundedIntIfSet("RESTIC_RETRIES", 2, 0, 10);

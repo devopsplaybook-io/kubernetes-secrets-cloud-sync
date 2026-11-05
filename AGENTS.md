@@ -196,9 +196,12 @@ is a valid label value (<= 63 chars). `src/SecretName.ts` holds the pure helpers
   the optional `RESTIC_HOST`/`RESTIC_TAG`/`RESTIC_SNAPSHOT_PATH`, newest by
   time) and streams each file with `restic dump <id> /<path>/<name>.json`; no
   restore and no temporary plaintext files (per-secret dump is deliberate, see
-  README). The newest snapshot must be at most
-  `RESTIC_MAX_SNAPSHOT_AGE_SECONDS` old (default 48 h, `0` disables); otherwise
-  the restic source fails the cycle and no stale Secret is written. Names and
+  README). The optional `RESTIC_MAX_SNAPSHOT_AGE_SECONDS` guard is disabled by
+  default (`0`): snapshots are created when secrets are pushed, not on a
+  schedule, so a fixed freshness window would fail every cycle between secret
+  changes. When enabled, the newest snapshot must be younger than the configured
+  age; otherwise the restic source fails the cycle and no stale Secret is
+  written. Names and
   `RESTIC_PATH` are validated (letters/digits/`.`, `_`, `-`, `/`; no `..`,
   empty segments or leading/trailing slash). stdout/stderr are decoded with a
   streaming UTF-8 decoder and capped at `RESTIC_MAX_OUTPUT_BYTES` per stream.
@@ -251,7 +254,7 @@ Key configuration values:
 - `RESTIC_TIMEOUT_SECONDS` - per-invocation restic timeout, whole process group killed (default: `120`)
 - `RESTIC_RETRIES` - transient restic failure retries (default: `2`)
 - `RESTIC_HOST` / `RESTIC_TAG` / `RESTIC_SNAPSHOT_PATH` - optional `restic snapshots` filters (default: empty = all snapshots). `RESTIC_SNAPSHOT_PATH` filters snapshots by backed-up path; `RESTIC_PATH` selects the folder inside a snapshot for `dump`
-- `RESTIC_MAX_SNAPSHOT_AGE_SECONDS` - newest snapshot must be younger than this; the restic source fails the cycle when stale (default: `172800` = 48 h, `0` disables)
+- `RESTIC_MAX_SNAPSHOT_AGE_SECONDS` - optional freshness guard: when > 0, the newest snapshot must be younger than this; the restic source fails the cycle when stale (default: `0` = disabled, because snapshots are event-driven)
 - `RESTIC_MAX_OUTPUT_BYTES` - per-stream stdout/stderr cap for one invocation (default: `8388608` = 8 MiB, clamped 65536-268435456)
 - Provider-specific: region, credentials for Alibaba KMS / AWS Secrets Manager / Restic
 
