@@ -301,12 +301,15 @@ snapshot of the whole repository. `RESTIC_SNAPSHOT_PATH` filters *snapshots* by
 backed-up path and is unrelated to `RESTIC_PATH`, which selects the folder
 inside a snapshot used by `dump`.
 
-The resolved snapshot must not be older than `RESTIC_MAX_SNAPSHOT_AGE_SECONDS`
-(default `172800`, i.e. 48 hours; `0` disables the guard). When the newest
-matching snapshot is older, or its time cannot be parsed, the restic source
-fails for the cycle: no stale Secret is written, the error names the snapshot
-and its age, and job mode exits non-zero. This is fail-closed by design, so a
-broken backup becomes visible instead of silently re-applying old data.
+The optional `RESTIC_MAX_SNAPSHOT_AGE_SECONDS` guard is **disabled by default**
+(`0`). Restic snapshots in this setup are event-driven: they are created when
+secrets are pushed, not on a fixed schedule, so between secret changes the
+newest snapshot is legitimately old and a fixed freshness window would make
+every cycle fail. When set to a positive value (e.g. `172800` for 48 hours),
+the newest matching snapshot must not be older than that value, and an older or
+unparseable snapshot fails the restic source for the cycle: no stale Secret is
+written, the error names the snapshot and its age, and job mode exits non-zero.
+Enable it only when the repository is written by a periodic backup pipeline.
 
 Secret names and `RESTIC_PATH` are validated before any restic invocation:
 only letters, digits, `.`, `_`, `-` and `/` are accepted, and leading/trailing
@@ -470,7 +473,7 @@ Configuration can be set via `config.json` or environment variables:
 | `RESTIC_HOST`                          |                                       | Only snapshots of this host (`--host`)       |
 | `RESTIC_TAG`                           |                                       | Only snapshots with this tag (`--tag`)       |
 | `RESTIC_SNAPSHOT_PATH`                 |                                       | Only snapshots of this path (`--path`)       |
-| `RESTIC_MAX_SNAPSHOT_AGE_SECONDS`      | `172800`                              | Max age of the newest snapshot; `0` disables |
+| `RESTIC_MAX_SNAPSHOT_AGE_SECONDS`      | `0`                                  | Max age of the newest snapshot; `0` disables |
 | `RESTIC_MAX_OUTPUT_BYTES`              | `8388608`                             | Max stdout/stderr bytes per invocation       |
 | `RESTIC_TIMEOUT_SECONDS`               | `120`                                 | Per-invocation restic timeout (SIGKILL)      |
 | `RESTIC_RETRIES`                       | `2`                                   | Retries for transient restic failures        |

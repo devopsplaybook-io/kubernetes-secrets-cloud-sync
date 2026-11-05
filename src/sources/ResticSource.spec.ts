@@ -433,6 +433,26 @@ describe("ResticSource", () => {
       await expect(fetch).resolves.toMatchObject({ secretName: "name-a" });
     });
 
+    it("accepts an old snapshot with the default configuration", async () => {
+      // Snapshots are produced when secrets are pushed, not on a schedule:
+      // the shipped default must not reject the newest snapshot by age.
+      const defaultConfig = new Config();
+      defaultConfig.RESTIC_REPOSITORY = "s3:https://example.com/restic-repo";
+      defaultConfig.RESTIC_PASSWORD = "restic-pass";
+      defaultConfig.RESTIC_PATH = "secrets";
+      const defaultSource = new ResticSource(defaultConfig);
+
+      const cycle = defaultSource.beginCycle(["name-a"]);
+      completeSnapshotResolution([
+        { id: "old", time: "2020-01-01T00:00:00Z" },
+      ]);
+      await cycle;
+
+      const fetch = defaultSource.fetchSecret("name-a");
+      completeDump({ key: "value" });
+      await expect(fetch).resolves.toMatchObject({ secretName: "name-a" });
+    });
+
     it("fails when the snapshot time is unparseable and the guard is enabled", async () => {
       const cycle = source.beginCycle(["name-a"]);
       completeSnapshotResolution([{ id: "no-time" }]);

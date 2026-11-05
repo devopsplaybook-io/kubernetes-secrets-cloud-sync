@@ -100,7 +100,7 @@ describe("Config", () => {
       expect(config.RESTIC_HOST).toBe("");
       expect(config.RESTIC_TAG).toBe("");
       expect(config.RESTIC_SNAPSHOT_PATH).toBe("");
-      expect(config.RESTIC_MAX_SNAPSHOT_AGE_SECONDS).toBe(172800);
+      expect(config.RESTIC_MAX_SNAPSHOT_AGE_SECONDS).toBe(0);
       expect(config.RESTIC_MAX_OUTPUT_BYTES).toBe(8388608);
       expect(config.SYNC_FETCH_CONCURRENCY).toBe(4);
       expect(config.SYNC_WRITE_CONCURRENCY).toBe(4);
