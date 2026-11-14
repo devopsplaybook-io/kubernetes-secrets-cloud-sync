@@ -264,7 +264,7 @@ Boolean config values accept `true`, `"true"`, or `"1"` (string or boolean).
 
 - Four-stage build: builder compiles TypeScript, a `prod-deps` stage runs
   `npm ci --omit=dev`, a `restic` stage takes the binary from the pinned
-  `restic/restic:0.18.1` image, and the runtime image copies only `dist`,
+  `restic/restic:0.19.1` image, and the runtime image copies only `dist`,
   production `node_modules` (no devDependencies) and `/usr/local/bin/restic`
 - Every `node:26-alpine` stage is pinned by digest, so the base OS and Node
   version change only by bumping the digest (Dependabot does this weekly via

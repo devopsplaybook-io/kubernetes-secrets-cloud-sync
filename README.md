@@ -988,7 +988,7 @@ through an Ingress or a LoadBalancer Service.
 - **The Alibaba SDK typings are no longer hand-declared.** `declarations.d.ts`
   was removed and the build uses the types shipped by the SDK packages, so an
   incompatible SDK upgrade fails the build.
-- **Supply chain pinned.** The node base image and `restic` 0.18.1 image are
+- **Supply chain pinned.** The node base image and `restic` 0.19.1 image are
   pinned by digest (restic comes from the official image instead of an apk
   package), and the reusable workflows plus `actions/checkout` are pinned to
   commit SHAs. Dependabot opens weekly update PRs for npm, Docker and GitHub
@@ -1019,7 +1019,7 @@ through an Ingress or a LoadBalancer Service.
 
 The `Dockerfile` builds in four stages: a builder compiles TypeScript, a
 dedicated stage installs production dependencies only (`npm ci --omit=dev`), a
-`restic` stage provides the CLI from the official `restic/restic:0.18.1` image,
+`restic` stage provides the CLI from the official `restic/restic:0.19.1` image,
 and the runtime image copies those `node_modules`, `dist` and the `restic`
 binary. Every `node:26-alpine` stage is pinned by digest, so the base OS and
 Node version only change when the digest is bumped. The image contains no
@@ -1087,7 +1087,7 @@ curl -sI -H "Authorization: Bearer $token" \
   -H 'Accept: application/vnd.oci.image.index.v1+json' \
   https://registry-1.docker.io/v2/library/node/manifests/26-alpine | grep -i docker-content-digest
 
-# restic/restic:0.18.1 digest (same pattern, repository:restic/restic:pull)
+# restic/restic:0.19.1 digest (same pattern, repository:restic/restic:pull)
 # common-utils main commit used by the reusable workflows
 git ls-remote https://github.com/devopsplaybook-io/common-utils.git refs/heads/main
 ```
