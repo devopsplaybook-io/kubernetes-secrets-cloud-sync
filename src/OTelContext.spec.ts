@@ -158,6 +158,10 @@ describe("OTelWithSpan", () => {
     });
     const logger = new ModuleLogger("spec", {
       getLogger: () => provider.getLogger("spec"),
+      // The exporter receives every record; "fallback" keeps the console out of
+      // the test output while a logger exists.
+      getConsoleMode: () => "fallback",
+      getLogLevel: () => "info",
     });
 
     logger.info("outside the span");
