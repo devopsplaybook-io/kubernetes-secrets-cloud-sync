@@ -24,7 +24,7 @@ RUN npm ci --omit=dev
 # RESTIC
 # Static binary from the official image; the version and digest are pinned
 # instead of installing a floating apk package.
-FROM restic/restic:0.19.1@sha256:136600b6ff6843d61d355f7f71f460a166429f35de6fd11b568fece3c9a4d510 AS restic
+FROM restic/restic:0.20.0@sha256:93999df80d4ac6cb148e82d2ef1fe6a81996f17ff535e772723538211b31555a AS restic
 
 
 # RUN
