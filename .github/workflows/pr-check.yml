@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   pr-verify:
-    uses: devopsplaybook-io/common-utils/.github/workflows/reusable-pr-verify.yml@608b30f62c685c5cd41661ff3cf14692ced42b16  # main
+    uses: devopsplaybook-io/common-utils/.github/workflows/reusable-pr-verify.yml@7cdda8f6000fab3c2597d14ab5c65c02790079e7  # main
     with:
       node_app_directories: '["."]'
     secrets:
