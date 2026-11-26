@@ -19,7 +19,7 @@
     "@alicloud/kms20160120": "^3.3.2",
     "@alicloud/openapi-client": "^0.4.15",
     "@alicloud/tea-util": "^1.4.11",
-    "@aws-sdk/client-secrets-manager": "^3.1169.0",
+    "@aws-sdk/client-secrets-manager": "^3.1172.0",
     "@devopsplaybook.io/otel-utils": "^1.14.2",
     "@devopsplaybook.io/otel-utils-fastify": "^1.11.2",
     "@kubernetes/client-node": "^2.0.2",
